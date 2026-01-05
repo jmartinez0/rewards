@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model RewardsConfig {
+  id                   Int      @id @default(1)
+  pointsPerDollar      Int      @default(20)
+  pointsExpirationDays Int?
+  isEnabled            Boolean  @default(true)
+  updatedAt            DateTime @updatedAt
+}
+
+model RewardsCustomer {
+  id                   Int                  @id @default(autoincrement())
+  email                String               @unique
+  shopifyCustomerId    String?              @unique
+  currentPoints        Int                  @default(0)
+  lifetimePoints       Int                  @default(0)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  rewardsLedgerEntries RewardsLedgerEntry[]
+}
+
+model RewardsLedgerEntry {
+  id                Int                  @id @default(autoincrement())
+  rewardsCustomerId Int
+  type              RewardsLedgerType
+  pointsDelta       Int
+  remainingPoints   Int?
+  expiresAt         DateTime?
+  orderId           String?
+  sourceLotId       Int?
+  source            RewardsLedgerSource  @default(AUTO)
+  notes             String?
+  createdAt         DateTime             @default(now())
+  rewardsCustomer   RewardsCustomer      @relation(fields: [rewardsCustomerId], references: [id])
+  sourceLot         RewardsLedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
+  depletions        RewardsLedgerEntry[] @relation("RelatedEarn")
+}
+
+enum RewardsLedgerType {
+  EARN
+  SPEND
+  ADJUST
+  EXPIRE
+}
+
+enum RewardsLedgerSource {
+  AUTO
+  MANUAL
+}
