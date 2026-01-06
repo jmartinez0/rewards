@@ -28,4 +28,4 @@ api_version = "2026-01"
 scopes = "read_orders"
 
 [auth]
-redirect_urls = [ "https://jm-rewards.vercel.app/api/auth" ]
+redirect_urls = [ "https://jm-rewards.vercel.app/auth/callback" ]
