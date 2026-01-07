@@ -1,4 +1,4 @@
-import { useLoaderData, useSearchParams } from "react-router";
+import { Outlet, useLoaderData, useParams, useSearchParams } from "react-router";
 import { useEffect, useRef, useState } from "react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -50,7 +50,10 @@ export default function Customers() {
     pageSize,
     query: initialQuery,
   } = useLoaderData();
+  const { id } = useParams();
+
   const [searchParams, setSearchParams] = useSearchParams();
+
   const [query, setQuery] = useState(initialQuery);
   const [debouncedQuery, setDebouncedQuery] = useState(initialQuery);
   const lastAppliedQueryRef = useRef(initialQuery);
@@ -59,6 +62,16 @@ export default function Customers() {
     const timer = setTimeout(() => setDebouncedQuery(query), 200);
     return () => clearTimeout(timer);
   }, [query]);
+
+  useEffect(() => {
+    const saved = sessionStorage.getItem("customersScroll");
+    if (!saved) return;
+    sessionStorage.removeItem("customersScroll");
+    const y = Number(saved);
+    if (!Number.isNaN(y)) {
+      window.scrollTo(0, y);
+    }
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(searchParams);
@@ -71,14 +84,17 @@ export default function Customers() {
     const nextQuery = normalized || "";
     const currentPage = searchParams.get("page") || "1";
     const nextPage = "1";
+
     if (currentQuery === nextQuery && currentPage === nextPage) {
       return;
     }
+
     if (nextQuery) {
       params.set("q", nextQuery);
     } else {
       params.delete("q");
     }
+
     params.set("page", nextPage);
     lastAppliedQueryRef.current = normalized;
     setSearchParams(params, { replace: true });
@@ -89,6 +105,11 @@ export default function Customers() {
   const endIndex = Math.min(page * pageSize, totalCustomers);
   const hasPreviousPage = page > 1;
   const hasNextPage = page * pageSize < totalCustomers;
+  const searchSuffix = searchParams.toString();
+
+  if (id) {
+    return <Outlet />;
+  }
 
   return (
     <s-page heading="Customers">
@@ -122,8 +143,27 @@ export default function Customers() {
                     </s-table-row>
                   ) : (
                     customers.map((customer) => (
-                      <s-table-row key={customer.id}>
-                        <s-table-cell>{customer.name ?? "—"}</s-table-cell>
+                      <s-table-row
+                        key={customer.id}
+                        clickDelegate={`customer-${customer.id}`}
+                      >
+                        <s-table-cell>
+                          <s-link
+                            id={`customer-${customer.id}`}
+                            href={`/app/customers/${customer.id}${
+                              searchSuffix ? `?${searchSuffix}` : ""
+                            }`}
+                            accessibilityLabel={`View ${customer.name || customer.email}`}
+                            onClick={() => {
+                              sessionStorage.setItem(
+                                "customersScroll",
+                                String(window.scrollY),
+                              );
+                            }}
+                          >
+                            {customer.name ?? "—"}
+                          </s-link>
+                        </s-table-cell>
                         <s-table-cell>{customer.email}</s-table-cell>
                         <s-table-cell>{customer.currentPoints}</s-table-cell>
                         <s-table-cell>{customer.lifetimePoints}</s-table-cell>
@@ -133,57 +173,60 @@ export default function Customers() {
                 </s-table-body>
               </s-table>
 
-              <div
-                style={{
-                  borderTop: "0.5px solid rgb(227 227 227)",
-                  position: "sticky",
-                  bottom: 0,
-                  zIndex: 10,
-                }}
-              >
-                <s-box background="subdued" padding="small-200">
-                  <s-stack
-                    direction="inline"
-                    justifyContent="start"
-                    alignItems="center"
-                    gap="small-100"
-                  >
-                    <s-button-group gap="none" accessibilityLabel="Pagination controls">
-                      <s-button
-                        slot="secondary-actions"
-                        variant="secondary"
-                        icon="chevron-left"
-                        accessibilityLabel="Previous page"
-                        disabled={!hasPreviousPage}
-                        onClick={() => {
-                          const params = new URLSearchParams(searchParams);
-                          params.set("page", String(Math.max(page - 1, 1)));
-                          setSearchParams(params);
-                        }}
+              {totalCustomers > 50 && (
+                <div
+                  style={{
+                    borderTop: "0.5px solid rgb(227 227 227)",
+                    position: "sticky",
+                    bottom: 0,
+                    zIndex: 10,
+                  }}
+                >
+                  <s-box background="subdued" padding="small-200">
+                    <s-stack
+                      direction="inline"
+                      justifyContent="start"
+                      alignItems="center"
+                      gap="small-100"
+                    >
+                      <s-button-group
+                        gap="none"
+                        accessibilityLabel="Pagination controls"
                       >
-                      </s-button>
+                        <s-button
+                          slot="secondary-actions"
+                          variant="secondary"
+                          icon="chevron-left"
+                          accessibilityLabel="Previous page"
+                          disabled={!hasPreviousPage}
+                          onClick={() => {
+                            const params = new URLSearchParams(searchParams);
+                            params.set("page", String(Math.max(page - 1, 1)));
+                            setSearchParams(params);
+                          }}
+                        />
 
-                      <s-button
-                        slot="secondary-actions"
-                        variant="secondary"
-                        icon="chevron-right"
-                        accessibilityLabel="Next page"
-                        disabled={!hasNextPage}
-                        onClick={() => {
-                          const params = new URLSearchParams(searchParams);
-                          params.set("page", String(page + 1));
-                          setSearchParams(params);
-                        }}
-                      >
-                      </s-button>
-                    </s-button-group>
+                        <s-button
+                          slot="secondary-actions"
+                          variant="secondary"
+                          icon="chevron-right"
+                          accessibilityLabel="Next page"
+                          disabled={!hasNextPage}
+                          onClick={() => {
+                            const params = new URLSearchParams(searchParams);
+                            params.set("page", String(page + 1));
+                            setSearchParams(params);
+                          }}
+                        />
+                      </s-button-group>
 
-                    <s-text color="subdued">
-                      {totalCustomers === 0 ? "0" : `${startIndex}-${endIndex}`}
-                    </s-text>
-                  </s-stack>
-                </s-box>
-              </div>
+                      <s-text color="subdued">
+                        {totalCustomers === 0 ? "0" : `${startIndex}-${endIndex}`}
+                      </s-text>
+                    </s-stack>
+                  </s-box>
+                </div>
+              )}
             </s-box>
           </s-section>
         </s-stack>
