@@ -38,6 +38,7 @@ model RewardsConfig {
 model RewardsCustomer {
   id                   Int                  @id @default(autoincrement())
   email                String               @unique
+  name                 String
   shopifyCustomerId    String?              @unique
   currentPoints        Int                  @default(0)
   lifetimePoints       Int                  @default(0)
@@ -49,28 +50,28 @@ model RewardsCustomer {
 model RewardsLedgerEntry {
   id                Int                  @id @default(autoincrement())
   rewardsCustomerId Int
-  type              RewardsLedgerType
+  type              LedgerType
   pointsDelta       Int
   remainingPoints   Int?
   expiresAt         DateTime?
   orderId           String?
   sourceLotId       Int?
-  source            RewardsLedgerSource  @default(AUTO)
   notes             String?
   createdAt         DateTime             @default(now())
+  creationMethod    CreationMethod       @default(AUTO)
   rewardsCustomer   RewardsCustomer      @relation(fields: [rewardsCustomerId], references: [id])
   sourceLot         RewardsLedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
   depletions        RewardsLedgerEntry[] @relation("RelatedEarn")
 }
 
-enum RewardsLedgerType {
+enum LedgerType {
   EARN
   SPEND
   ADJUST
   EXPIRE
 }
 
-enum RewardsLedgerSource {
+enum CreationMethod {
   AUTO
   MANUAL
 }

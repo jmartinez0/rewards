@@ -35,7 +35,7 @@ export const action = async ({ request }) => {
   const pointsExpirationDays = parseOptionalInt(
     formData.get("pointsExpirationDays"),
   );
-  const isEnabled = formData.get("isEnabled") === "on";
+  const isEnabled = formData.get("isEnabled") === "active";
 
   const errors = {};
   if (pointsPerDollar == null || pointsPerDollar < 0) {
@@ -162,12 +162,21 @@ export default function SettingsPage() {
                 setPointsExpirationDays(event.currentTarget.value)
               }
             />
-            <s-switch
-              label="Enable rewards"
+            <s-select
+              label="Status"
               name="isEnabled"
-              checked={isEnabled}
-              onChange={(event) => setIsEnabled(event.currentTarget.checked)}
-            />
+              value={isEnabled ? "active" : "inactive"}
+              onChange={(event) =>
+                setIsEnabled(event.currentTarget.value === "active")
+              }
+            >
+              <s-option value="active">
+                Active — Customers can earn and spend points
+              </s-option>
+              <s-option value="inactive">
+                Inactive — Pause all earning and spending
+              </s-option>
+            </s-select>
           </s-stack>
         </form>
       </s-section>

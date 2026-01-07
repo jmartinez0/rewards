@@ -14,7 +14,7 @@ database.sqlite
 .env.*
 .DS_Store
 /.vscode
-
+/.codex
 
 
 /extensions/*/dist

@@ -45,6 +45,25 @@ const getCustomerId = (order) => {
   return null;
 };
 
+const formatName = (firstName, lastName) => {
+  const combined = [firstName, lastName].filter(Boolean).join(" ").trim();
+  return combined ? combined.replace(/\s+/g, " ") : null;
+};
+
+const getOrderName = (order) => {
+  const customer = order?.customer;
+  const billing = order?.billing_address;
+  const shipping = order?.shipping_address;
+
+  const fromCustomer = formatName(customer?.first_name, customer?.last_name);
+  if (fromCustomer) return fromCustomer;
+
+  const fromBilling = formatName(billing?.first_name, billing?.last_name);
+  if (fromBilling) return fromBilling;
+
+  return formatName(shipping?.first_name, shipping?.last_name);
+};
+
 const parseOrderDate = (value) => {
   if (!value) {
     return new Date();
@@ -97,6 +116,7 @@ export const action = async ({ request }) => {
     : null;
 
   const shopifyCustomerId = getCustomerId(order);
+  const name = getOrderName(order);
 
   await db.$transaction(async (tx) => {
     const existingEarn = await tx.rewardsLedgerEntry.findFirst({
@@ -119,12 +139,21 @@ export const action = async ({ request }) => {
         data: {
           email,
           shopifyCustomerId,
+          name,
         },
       });
     } else if (!rewardsCustomer.shopifyCustomerId && shopifyCustomerId) {
       rewardsCustomer = await tx.rewardsCustomer.update({
         where: { id: rewardsCustomer.id },
-        data: { shopifyCustomerId },
+        data: {
+          shopifyCustomerId,
+          ...(name && name !== rewardsCustomer.name ? { name } : {}),
+        },
+      });
+    } else if (name && name !== rewardsCustomer.name) {
+      rewardsCustomer = await tx.rewardsCustomer.update({
+        where: { id: rewardsCustomer.id },
+        data: { name },
       });
     }
 
@@ -136,7 +165,7 @@ export const action = async ({ request }) => {
         remainingPoints: points,
         expiresAt,
         orderId,
-        source: "AUTO",
+        creationMethod: "AUTO",
       },
     });
 
