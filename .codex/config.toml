@@ -1,6 +1,0 @@
-[mcp_servers.shopify-dev-mcp]
-command = "npx"
-args = ["-y", "@shopify/dev-mcp@latest"]
-
-[mcp_servers.shopify-dev-mcp.env]
-LIQUID_VALIDATION_MODE = "full"

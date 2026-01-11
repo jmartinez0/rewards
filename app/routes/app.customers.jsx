@@ -115,7 +115,7 @@ export default function Customers() {
     <s-page heading="Customers">
       {totalCustomers === 0 && !query ? (
         <s-section padding="none">
-          <s-paragraph>No rewards customers yet.</s-paragraph>
+          <s-paragraph>No rewards customers found.</s-paragraph>
         </s-section>
       ) : (
         <s-stack direction="block" gap="base">

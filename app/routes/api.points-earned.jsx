@@ -1,10 +1,9 @@
-import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type",
 };
 
 export const loader = async ({ request }) => {
@@ -17,32 +16,40 @@ export const loader = async ({ request }) => {
     });
   }
 
-  const { cors } = await authenticate.public.checkout(request);
-
   const orderId = url.searchParams.get("orderId");
 
   if (!orderId) {
-    return cors(
-      new Response(JSON.stringify({ error: "Missing orderId" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
+    return new Response(JSON.stringify({ error: "Missing orderId" }), {
+      status: 400,
+      headers: {
+        "Content-Type": "application/json",
+        ...CORS_HEADERS,
+      },
+    });
   }
 
+  try {
+    await db.$queryRaw`SELECT 1`;
+  } catch (err) {
+    console.error("DB warm failed:", err);
+  }
+  
   const entry = await db.rewardsLedgerEntry.findFirst({
     where: {
       orderId,
       type: "EARN",
-      creationMethod: "AUTO",
       pointsDelta: { gt: 0 },
     },
   });
 
-  return cors(
-    new Response(
-      JSON.stringify({ pointsEarned: entry?.pointsDelta ?? 0 }),
-      { headers: { "Content-Type": "application/json" } },
-    ),
+  return new Response(
+    JSON.stringify({ pointsEarned: entry?.pointsDelta ?? 0 }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...CORS_HEADERS,
+      },
+    }
   );
 };
