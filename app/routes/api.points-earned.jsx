@@ -16,9 +16,9 @@ export const loader = async ({ request }) => {
     });
   }
 
-  const orderId = url.searchParams.get("orderId");
+  const rawOrderId = url.searchParams.get("orderId");
 
-  if (!orderId) {
+  if (!rawOrderId) {
     return new Response(JSON.stringify({ error: "Missing orderId" }), {
       status: 400,
       headers: {
@@ -28,19 +28,37 @@ export const loader = async ({ request }) => {
     });
   }
 
+  let normalizedOrderId = rawOrderId;
+
+  const idMatch = rawOrderId.match(/(\d+)$/);
+  const numericId = idMatch ? idMatch[1] : null;
+
+  if (numericId) {
+    normalizedOrderId = `gid://shopify/Order/${numericId}`;
+  }
+
   try {
     await db.$queryRaw`SELECT 1`;
   } catch (err) {
     console.error("DB warm failed:", err);
   }
-  
+
   const entry = await db.rewardsLedgerEntry.findFirst({
     where: {
-      orderId,
+      orderId: normalizedOrderId,
       type: "EARN",
       pointsDelta: { gt: 0 },
     },
   });
+
+  if (!entry) {
+    console.log("POINTS API: no EARN entry yet for", normalizedOrderId);
+  } else {
+    console.log("POINTS API: found EARN entry", {
+      orderId: normalizedOrderId,
+      points: entry.pointsDelta,
+    });
+  }
 
   return new Response(
     JSON.stringify({ pointsEarned: entry?.pointsDelta ?? 0 }),
@@ -50,6 +68,6 @@ export const loader = async ({ request }) => {
         "Content-Type": "application/json",
         ...CORS_HEADERS,
       },
-    }
+    },
   );
 };

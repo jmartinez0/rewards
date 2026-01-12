@@ -19,17 +19,22 @@ function PointsEarnedBanner() {
   const settings = useSettings();
   const [pointsEarned, setPointsEarned] = useState(null);
 
+  console.log("ORDER CONFIRMATION FROM useSubscription(api.orderConfirmation): " + orderConfirmation.order.id)
   useEffect(() => {
+
+      console.log("settings in extension:", settings);
+
     const orderId = orderConfirmation?.order?.id;
     if (!orderId) return;
 
     let cancelled = false;
     const appUrl = String(settings?.app_url ?? DEFAULT_APP_URL).replace(/\/$/, "");
 
+    console.log('about to fetch w orderid:' + orderId);
     const loadPoints = async () => {
       try {
         const res = await fetch(
-          `${appUrl}/api/points-earned?orderId=${encodeURIComponent(orderId)}`
+          `${appUrl}/api/points-earned?orderId=${orderId}`
         );
 
         if (!res.ok) return;
