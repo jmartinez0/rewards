@@ -3,6 +3,7 @@ import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import {
   useApi,
+  useSessionToken,
   useSettings,
   useSubscription,
 } from "@shopify/ui-extensions/checkout/preact";
@@ -16,43 +17,92 @@ export default function extension() {
 function PointsEarnedBanner() {
   const api = useApi("purchase.thank-you.block.render");
   const orderConfirmation = useSubscription(api.orderConfirmation);
+  const rawSessionToken = useSessionToken();
   const settings = useSettings();
   const [pointsEarned, setPointsEarned] = useState(null);
 
-  console.log("ORDER CONFIRMATION FROM useSubscription(api.orderConfirmation): " + orderConfirmation.order.id)
   useEffect(() => {
-
-      console.log("settings in extension:", settings);
-
     const orderId = orderConfirmation?.order?.id;
-    if (!orderId) return;
+    if (!orderId || !rawSessionToken) {
+      return;
+    }
 
     let cancelled = false;
     const appUrl = String(settings?.app_url ?? DEFAULT_APP_URL).replace(/\/$/, "");
 
-    console.log('about to fetch w orderid:' + orderId);
-    const loadPoints = async () => {
+    const loadPointsWithRetry = async () => {
       try {
-        const res = await fetch(
-          `${appUrl}/api/points-earned?orderId=${orderId}`
-        );
-
-        if (!res.ok) return;
-
-        const data = await res.json();
-        if (!cancelled) {
-          setPointsEarned(data?.pointsEarned ?? 0);
+        let tokenString;
+        if (typeof rawSessionToken === "string") {
+          tokenString = rawSessionToken;
+        } else if (typeof rawSessionToken.get === "function") {
+          tokenString = await rawSessionToken.get();
+        } else {
+          console.warn("Unexpected sessionToken type:", rawSessionToken);
+          return;
         }
-      } catch (err) {
-        console.error("Failed to load points earned:", err);
+
+        if (!tokenString) {
+          console.warn("Empty session token");
+          return;
+        }
+
+        const makeRequest = async () => {
+          const url = `${appUrl}/api/points-earned?orderId=${encodeURIComponent(
+            orderId,
+          )}&sessionToken=${encodeURIComponent(tokenString)}`;
+
+          const res = await fetch(url);
+          if (!res.ok) {
+            console.warn("Points API not OK:", res.status);
+            return null;
+          }
+
+          const data = await res.json();
+          if (!data || typeof data.pointsEarned !== "number") {
+            return 0;
+          }
+          return data.pointsEarned;
+        };
+
+        const maxAttempts = 10;
+        const delayMs = 300;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          if (cancelled) return;
+
+          const pts = await makeRequest();
+
+          if (pts && pts > 0) {
+            if (!cancelled) {
+              setPointsEarned(pts);
+            }
+            return;
+          }
+
+          if (attempt < maxAttempts) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          } else {
+            if (!cancelled) {
+              setPointsEarned(0);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Failed to load points earned: ", error);
       }
     };
 
-    loadPoints();
-    return () => { cancelled = true; };
-  }, [orderConfirmation?.order?.id, settings?.app_url]);
+    loadPointsWithRetry();
 
-  if (pointsEarned == null) return null;
+    return () => {
+      cancelled = true;
+    };
+  }, [orderConfirmation?.order?.id, rawSessionToken, settings?.app_url]);
+
+  if (pointsEarned == null) {
+    return null;
+  }
 
   return (
     <s-banner tone="success" heading={`You earned ${pointsEarned} points!`}>

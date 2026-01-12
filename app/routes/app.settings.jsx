@@ -28,7 +28,7 @@ const parseOptionalInt = (value) => {
 };
 
 export const action = async ({ request }) => {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
 
   const pointsPerDollar = parseOptionalInt(formData.get("pointsPerDollar"));
@@ -67,6 +67,56 @@ export const action = async ({ request }) => {
       isEnabled,
     },
   });
+
+  try {
+    const shopIdResponse = await admin.graphql(`
+      query ShopId {
+        shop {
+          id
+        }
+      }
+    `);
+    const shopIdJson = await shopIdResponse.json();
+    const ownerId = shopIdJson?.data?.shop?.id;
+
+    const mutation = `
+      mutation {
+        metafieldsSet(
+          metafields: [
+            {
+              ownerId: "${ownerId}"
+              namespace: "rewards"
+              key: "points_per_dollar"
+              type: "number_integer"
+              value: "${pointsPerDollar}"
+            }
+          ]
+        ) {
+          metafields {
+            id
+            namespace
+            key
+            type
+            value
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const metafieldResponse = await admin.graphql(mutation);
+    const metafieldJson = await metafieldResponse.json();
+    const userErrors = metafieldJson?.data?.metafieldsSet?.userErrors ?? [];
+
+    if (userErrors.length > 0) {
+      console.error("Failed to set rewards.points_per_dollar: ", userErrors);
+    }
+  } catch (error) {
+    console.error("Error setting rewards.points_per_dollar: ", error);
+  }
 
   return { ok: true, savedAt: Date.now() };
 };
