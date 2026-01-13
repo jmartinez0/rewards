@@ -1,6 +1,8 @@
-import { useState } from "react";
-import { useLoaderData, useSearchParams } from "react-router";
+import { useRef, useState } from "react";
+import { useEffect } from "react";
+import { useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
@@ -36,16 +38,152 @@ export const loader = async ({ request, params }) => {
   return { customer, storeSlug };
 };
 
+export const action = async ({ request, params }) => {
+  await authenticate.admin(request);
+
+  const id = Number.parseInt(params.id, 10);
+  if (Number.isNaN(id)) {
+    throw new Response("Invalid customer id", { status: 400 });
+  }
+
+  const formData = await request.formData();
+  const intent = String(formData.get("intent") ?? "");
+  if (intent !== "adjust_points") {
+    return { ok: false, errors: { form: "Unsupported action" } };
+  }
+
+  const adjustmentType = String(formData.get("adjustmentType") ?? "");
+  const adjustByRaw = String(formData.get("adjustBy") ?? "").trim();
+  const reason = String(formData.get("reason") ?? "").trim();
+
+  const errors = {};
+
+  const adjustBy = Number(adjustByRaw);
+  if (!adjustByRaw || !Number.isFinite(adjustBy) || !Number.isInteger(adjustBy)) {
+    errors.adjustBy = "Must be a number";
+  }
+
+  if (!reason) {
+    errors.reason = "Reason is required";
+  }
+
+  const customer = await db.rewardsCustomer.findUnique({ where: { id } });
+  if (!customer) {
+    throw new Response("Customer not found", { status: 404 });
+  }
+
+  if (adjustmentType === "increase") {
+    if (!errors.adjustBy && adjustBy <= 0) {
+      errors.adjustBy = "Must be a positive integer";
+    }
+  } else if (adjustmentType === "decrease") {
+    if (!errors.adjustBy && (adjustBy < 1 || adjustBy > customer.currentPoints)) {
+      errors.adjustBy = `Must be between 1-${customer.currentPoints}`;
+    }
+  } else {
+    errors.adjustmentType = "Select increase or decrease";
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { ok: false, errors };
+  }
+
+  const config = await db.rewardsConfig.findUnique({ where: { id: 1 } });
+  const now = new Date();
+  const expiresAt =
+    adjustmentType === "increase" && config?.pointsExpirationDays
+      ? new Date(
+        now.getTime() + config.pointsExpirationDays * 24 * 60 * 60 * 1000,
+      )
+      : null;
+
+  const pointsDelta = adjustmentType === "decrease" ? -adjustBy : adjustBy;
+
+  await db.$transaction(async (tx) => {
+    await tx.rewardsLedgerEntry.create({
+      data: {
+        rewardsCustomerId: customer.id,
+        type: "ADJUST",
+        pointsDelta,
+        remainingPoints: pointsDelta > 0 ? pointsDelta : null,
+        expiresAt,
+        notes: reason,
+        createdAt: now,
+      },
+    });
+
+    await tx.rewardsCustomer.update({
+      where: { id: customer.id },
+      data: {
+        currentPoints:
+          pointsDelta > 0
+            ? { increment: pointsDelta }
+            : { decrement: Math.abs(pointsDelta) },
+        ...(pointsDelta > 0 ? { lifetimePoints: { increment: pointsDelta } } : {}),
+      },
+    });
+  });
+
+  return { ok: true, savedAt: Date.now() };
+};
+
 export default function CustomerDetails() {
   const { customer, storeSlug } = useLoaderData();
   const [searchParams] = useSearchParams();
+  const fetcher = useFetcher();
+  const revalidator = useRevalidator();
+  const shopify = useAppBridge();
+  const lastAdjustmentSavedAtRef = useRef(null);
   const [adjustmentType, setAdjustmentType] = useState("increase");
+  const [adjustBy, setAdjustBy] = useState("");
+  const [adjustReason, setAdjustReason] = useState("");
+  const [adjustTouched, setAdjustTouched] = useState(false);
 
   const ledgerEntries = Array.isArray(customer.rewardsLedgerEntries)
     ? customer.rewardsLedgerEntries
     : [];
 
   const historyRows = buildHistoryRows(ledgerEntries);
+
+  const adjustByError = getAdjustByError({
+    adjustmentType,
+    adjustBy,
+    currentPoints: customer.currentPoints,
+  });
+  const reasonError = getReasonError(adjustReason);
+  const serverAdjustByError = fetcher.data?.errors?.adjustBy;
+  const serverReasonError = fetcher.data?.errors?.reason;
+  const canSaveAdjustment =
+    !adjustByError && !reasonError && fetcher.state === "idle";
+  const afterAdjustmentPoints = getAfterAdjustmentPoints({
+    adjustmentType,
+    currentPoints: customer.currentPoints,
+    adjustBy,
+  });
+
+  useEffect(() => {
+    if (fetcher.state !== "idle") return;
+    if (!fetcher.data?.ok || !fetcher.data?.savedAt) return;
+    if (fetcher.data.savedAt === lastAdjustmentSavedAtRef.current) return;
+
+    lastAdjustmentSavedAtRef.current = fetcher.data.savedAt;
+
+    const modalEl = document.getElementById("adjustPoints");
+    if (modalEl && typeof modalEl.hideOverlay === "function") {
+      modalEl.hideOverlay();
+    }
+
+    setAdjustmentType("increase");
+    setAdjustBy("");
+    setAdjustReason("");
+    setAdjustTouched(false);
+
+    if (shopify?.toast) {
+      shopify.toast.show("Points adjusted");
+    }
+
+    revalidator.revalidate();
+  }, [fetcher.data, fetcher.state, revalidator, shopify]);
 
   const searchSuffix = searchParams.toString();
   const backHref = searchSuffix
@@ -96,7 +234,9 @@ export default function CustomerDetails() {
               <s-heading>Points</s-heading>
               <s-text>Current points: {formatNumber(customer.currentPoints)}</s-text>
               <s-text>Lifetime points: {formatNumber(customer.lifetimePoints)}</s-text>
-              <s-button commandFor="adjustPoints">Adjust points</s-button>
+              <s-button commandFor="adjustPoints">
+                Adjust points
+              </s-button>
             </s-stack>
           </s-section>
         </s-grid>
@@ -129,7 +269,7 @@ export default function CustomerDetails() {
                           <s-box padding="none none none small-400">{formatDateMMDDYYYY(entry.createdAt)}</s-box>
                         </s-table-cell>
                         <s-table-cell>{formatLedgerType(entry.type)}</s-table-cell>
-                        <s-table-cell>{entry.pointsDelta}</s-table-cell>
+                        <s-table-cell>{formatSignedPoints(entry.pointsDelta)}</s-table-cell>
                         <s-link id={rowId} commandFor={modalId} />
                       </s-table-row>
                     );
@@ -267,11 +407,23 @@ export default function CustomerDetails() {
                   </s-unordered-list>
                 </s-stack>
               ) : null}
+              {entry.type === "ADJUST" ? (
+                <s-text>Reason: {entry.notes?.trim() || "—"}</s-text>
+              ) : null}
             </s-stack>
           </s-modal>
         );
       })}
-      <s-modal id="adjustPoints" heading="Adjust points">
+      <s-modal
+        id="adjustPoints"
+        heading="Adjust points"
+        onAfterHide={() => {
+          setAdjustBy("");
+          setAdjustReason("");
+          setAdjustTouched(false);
+          setAdjustmentType("increase");
+        }}
+      >
         <s-stack direction="block" gap="base">
 
           <s-select
@@ -291,16 +443,24 @@ export default function CustomerDetails() {
           <s-text-field
             label={adjustmentType === "decrease" ? "Decrease by" : "Increase by"}
             name="adjustByField"
+            value={adjustBy}
+            onChange={(event) => setAdjustBy(event.currentTarget.value)}
+            onInput={(event) => setAdjustBy(event.currentTarget.value)}
+            error={adjustTouched ? (adjustByError || serverAdjustByError) : undefined}
           />
 
           <s-text-field
             label="Reason"
             name="reason"
+            value={adjustReason}
+            onChange={(event) => setAdjustReason(event.currentTarget.value)}
+            onInput={(event) => setAdjustReason(event.currentTarget.value)}
+            error={adjustTouched ? (reasonError || serverReasonError) : undefined}
           />
 
           <s-stack gap="small">
             <s-text>Current points: {formatNumber(customer.currentPoints)} points</s-text>
-            <s-text>After adjustment: {formatNumber(customer.currentPoints)} points</s-text>
+            <s-text>After adjustment: {formatNumber(afterAdjustmentPoints)} points</s-text>
           </s-stack>
         </s-stack>
 
@@ -310,8 +470,18 @@ export default function CustomerDetails() {
         <s-button
           slot="primary-action"
           variant="primary"
-          commandFor="adjustPoints"
-          command="--hide"
+          disabled={fetcher.state !== "idle"}
+          loading={fetcher.state !== "idle"}
+          onClick={() => {
+            setAdjustTouched(true);
+            if (!canSaveAdjustment) return;
+            const formData = new FormData();
+            formData.set("intent", "adjust_points");
+            formData.set("adjustmentType", adjustmentType);
+            formData.set("adjustBy", adjustBy.trim());
+            formData.set("reason", adjustReason.trim());
+            fetcher.submit(formData, { method: "post" });
+          }}
         >
           Save
         </s-button>
@@ -331,6 +501,50 @@ function getTrailingNumericId(value) {
   if (typeof value !== "string") return null;
   const match = value.match(/(\d+)$/);
   return match ? match[1] : null;
+}
+
+function getAdjustByError({ adjustmentType, adjustBy, currentPoints }) {
+  const rawValue = adjustBy.trim();
+  if (!rawValue) return "Must be a number";
+
+  const amount = Number(rawValue);
+  if (!Number.isFinite(amount)) return "Must be a number";
+
+  if (!Number.isInteger(amount)) {
+    return adjustmentType === "decrease"
+      ? `Must be between 1-${currentPoints}`
+      : "Must be a positive integer";
+  }
+
+  if (adjustmentType === "increase") {
+    if (amount <= 0) return "Must be a positive integer";
+    return null;
+  }
+
+  if (adjustmentType === "decrease") {
+    if (amount < 1 || amount > currentPoints) {
+      return `Must be between 1-${currentPoints}`;
+    }
+    return null;
+  }
+
+  return "Must be a number";
+}
+
+function getReasonError(reason) {
+  if (!reason.trim()) return "Reason is required";
+  return null;
+}
+
+function getAfterAdjustmentPoints({ adjustmentType, currentPoints, adjustBy }) {
+  const amount = Number(adjustBy.trim());
+  if (!Number.isFinite(amount) || amount < 0) return currentPoints;
+
+  if (adjustmentType === "decrease") {
+    return currentPoints - amount;
+  }
+
+  return currentPoints + amount;
 }
 
 function formatDateMMDDYYYY(value) {
@@ -374,6 +588,12 @@ function formatTimestampLong(value) {
 function formatNumber(value) {
   if (typeof value !== "number" || Number.isNaN(value)) return "-";
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatSignedPoints(pointsDelta) {
+  if (typeof pointsDelta !== "number" || Number.isNaN(pointsDelta)) return "-";
+  if (pointsDelta > 0) return `+${formatNumber(pointsDelta)}`;
+  return formatNumber(pointsDelta);
 }
 
 function formatLedgerType(type) {
