@@ -111,8 +111,8 @@ export const action = async ({ request }) => {
   const earnedAt = parseOrderDate(order?.processed_at || order?.created_at);
   const expiresAt = config.pointsExpirationDays
     ? new Date(
-        earnedAt.getTime() + config.pointsExpirationDays * 24 * 60 * 60 * 1000,
-      )
+      earnedAt.getTime() + config.pointsExpirationDays * 24 * 60 * 60 * 1000,
+    )
     : null;
 
   const shopifyCustomerId = getCustomerId(order);
