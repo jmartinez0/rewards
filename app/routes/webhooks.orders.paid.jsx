@@ -164,8 +164,7 @@ export const action = async ({ request }) => {
         pointsDelta: points,
         remainingPoints: points,
         expiresAt,
-        orderId,
-        creationMethod: "AUTO",
+        orderId
       },
     });
 

@@ -123,7 +123,6 @@ export default function CustomerDetails() {
                 <s-table-header><s-box padding="none small-400">Date</s-box></s-table-header>
                 <s-table-header>Type</s-table-header>
                 <s-table-header>Points</s-table-header>
-                <s-table-header>Creation method</s-table-header>
               </s-table-header-row>
               <s-table-body>
                 {ledgerEntries.length ? (
@@ -141,9 +140,6 @@ export default function CustomerDetails() {
                         </s-table-cell>
                         <s-table-cell>{formatLedgerType(entry.type)}</s-table-cell>
                         <s-table-cell>{formatPointsDelta(entry.pointsDelta)}</s-table-cell>
-                        <s-table-cell>
-                          {formatCreationMethod(entry.creationMethod)}
-                        </s-table-cell>
                         <s-link id={rowId} commandFor={modalId} />
                       </s-table-row>
                     );
@@ -153,7 +149,6 @@ export default function CustomerDetails() {
                     <s-table-cell>
                       <s-box padding="none small-400">—</s-box>
                     </s-table-cell>
-                    <s-table-cell>—</s-table-cell>
                     <s-table-cell>—</s-table-cell>
                     <s-table-cell>—</s-table-cell>
                   </s-table-row>
@@ -167,6 +162,7 @@ export default function CustomerDetails() {
       {ledgerEntries.map((entry, index) => {
         const num = index + 1;
         const modalId = `modal-${num}`;
+        const pointsLabel = getPointsLabel(entry);
 
         return (
           <s-modal
@@ -176,13 +172,29 @@ export default function CustomerDetails() {
           >
             <s-stack direction="block" gap="small">
               <s-text>
-                <s-text type="strong">Date:</s-text>{" "}
-                {formatDateMMDDYYYY(entry.createdAt)}
+                <s-text type="strong">Timestamp:</s-text>{" "}
+                {formatTimestampLong(entry.createdAt)}
               </s-text>
-              <s-text>
-                <s-text type="strong">Creation method:</s-text>{" "}
-                {entry.creationMethod ?? "—"}
-              </s-text>
+              {pointsLabel ? (
+                <s-text>
+                  <s-text type="strong">{pointsLabel}:</s-text>{" "}
+                  {formatPointsAmount(entry.pointsDelta)}
+                </s-text>
+              ) : null}
+              {entry.type === "EARN" ? (
+                <s-text>
+                  <s-text type="strong">Points remaining:</s-text>{" "}
+                  {typeof entry.remainingPoints === "number"
+                    ? entry.remainingPoints
+                    : "—"}
+                </s-text>
+              ) : null}
+              {entry.type === "EARN" ? (
+                <s-text>
+                  <s-text type="strong">Expires:</s-text>{" "}
+                  {entry.expiresAt ? formatDateMMDDYYYY(entry.expiresAt) : "—"}
+                </s-text>
+              ) : null}
             </s-stack>
           </s-modal>
         );
@@ -252,10 +264,40 @@ function formatDateMMDDYYYY(value) {
   }).format(date);
 }
 
+function formatTimestampLong(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).formatToParts(date);
+
+  const part = (type) => parts.find((p) => p.type === type)?.value ?? "";
+
+  const month = part("month");
+  const day = part("day");
+  const year = part("year");
+  const hour = part("hour");
+  const minute = part("minute");
+  const dayPeriod = part("dayPeriod").toLowerCase();
+
+  return `${month} ${day}, ${year} at ${hour}:${minute} ${dayPeriod}`;
+}
+
 function formatPointsDelta(pointsDelta) {
   if (typeof pointsDelta !== "number" || Number.isNaN(pointsDelta)) return "—";
   if (pointsDelta > 0) return `+${pointsDelta}`;
   return String(pointsDelta);
+}
+
+function formatPointsAmount(pointsDelta) {
+  if (typeof pointsDelta !== "number" || Number.isNaN(pointsDelta)) return "—";
+  return String(Math.abs(pointsDelta));
 }
 
 function formatLedgerType(type) {
@@ -274,16 +316,18 @@ function formatLedgerType(type) {
   }
 }
 
-function formatCreationMethod(method) {
-  if (typeof method !== "string" || !method) return "—";
-  switch (method) {
-    case "AUTO":
-      return "Automatic";
-    case "MANUAL":
-      return "Manual";
-    default:
-      return method;
+function getPointsLabel(entry) {
+  if (!entry) return null;
+
+  if (entry.type === "EARN") return "Points earned";
+  if (entry.type === "SPEND") return "Points spent";
+
+  if (entry.type === "ADJUST") {
+    if (entry.pointsDelta > 0) return "Points added";
+    if (entry.pointsDelta < 0) return "Points removed";
   }
+
+  return null;
 }
 
 export const headers = (headersArgs) => {

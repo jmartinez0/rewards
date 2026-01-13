@@ -58,7 +58,6 @@ model RewardsLedgerEntry {
   sourceLotId       Int?
   notes             String?
   createdAt         DateTime             @default(now())
-  creationMethod    CreationMethod       @default(AUTO)
   rewardsCustomer   RewardsCustomer      @relation(fields: [rewardsCustomerId], references: [id])
   sourceLot         RewardsLedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
   depletions        RewardsLedgerEntry[] @relation("RelatedEarn")
@@ -69,9 +68,4 @@ enum LedgerType {
   SPEND
   ADJUST
   EXPIRE
-}
-
-enum CreationMethod {
-  AUTO
-  MANUAL
 }
