@@ -31,27 +31,42 @@ export const loader = async ({ request }) => {
 
   const where = searchTerms ? { shop, ...searchTerms } : { shop };
 
-  const total = await db.customer.count({
-    where,
-  });
+  const [totalAllCustomers, total, customers, config, discountRuleCount] =
+    await Promise.all([
+      db.customer.count({ where: { shop } }),
+      db.customer.count({ where }),
+      db.customer.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: pageSize,
+        skip: (page - 1) * pageSize,
+      }),
+      db.config.findUnique({ where: { shop } }),
+      db.discountRule.count({ where: { shop } }),
+    ]);
 
-  const customers = await db.customer.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-    take: pageSize,
-    skip: (page - 1) * pageSize,
-  });
-
-  return { customers, total, page, pageSize, query };
+  return {
+    customers,
+    total,
+    totalAllCustomers,
+    page,
+    pageSize,
+    query,
+    configuredPointsPerDollar: Boolean(config?.configuredPointsPerDollar),
+    hasDiscountRule: discountRuleCount > 0,
+  };
 };
 
 export default function Customers() {
   const {
     customers,
     total,
+    totalAllCustomers,
     page,
     pageSize,
     query: initialQuery,
+    configuredPointsPerDollar,
+    hasDiscountRule,
   } = useLoaderData();
   const { id } = useParams();
 
@@ -116,11 +131,23 @@ export default function Customers() {
 
   return (
     <s-page heading="Customers">
-      {totalCustomers === 0 && !query ? (
+      <s-stack direction="block" gap="base">
+        {!configuredPointsPerDollar ? (
+          <s-banner tone="critical">
+            You need to configure how many points your customers will earn per
+            dollar spent. <s-link href="/app/settings">Go to settings.</s-link>
+          </s-banner>
+        ) : null}
+        {!hasDiscountRule ? (
+          <s-banner tone="caution">
+            You need to add at least one discount rule for your customers to
+            spend their points. This does not affect earning points.{" "}
+            <s-link href="/app/settings">Go to settings.</s-link>
+          </s-banner>
+        ) : null}
+      {totalAllCustomers === 0 && !initialQuery ? (
         <s-section padding="base">
           <s-paragraph>No rewards customers found yet.</s-paragraph>
-          <s-paragraph><strong>Before customers can be rewarded</strong>, go to <s-link href="/app/settings">settings</s-link> and save your custom configuration.</s-paragraph>
-          <s-paragraph><strong>After your configuration is saved</strong>, when a customer places a new order, their rewards account will be created automatically.</s-paragraph>
         </s-section>
       ) : (
         <s-stack direction="block" gap="base">
@@ -236,6 +263,7 @@ export default function Customers() {
           </s-section>
         </s-stack>
       )}
+      </s-stack>
     </s-page>
   );
 }

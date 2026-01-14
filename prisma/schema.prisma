@@ -28,12 +28,16 @@ model Session {
 }
 
 model Config {
-  id                   Int      @id @default(autoincrement())
-  shop                 String   @unique
-  pointsPerDollar      Int      @default(20)
-  pointsExpirationDays Int?
-  isEnabled            Boolean  @default(true)
-  updatedAt            DateTime @updatedAt
+  id                        Int      @id @default(autoincrement())
+  shop                      String   @unique
+  pointsPerDollar           Int      @default(20)
+  pointsExpirationDays      Int?
+  isEnabled                 Boolean  @default(true)
+  updatedAt                 DateTime @updatedAt
+  configuredPointsPerDollar Boolean  @default(false)
+  configuredDiscountRule    Boolean  @default(false)
+  addedPointsEarnedBanner   Boolean  @default(false)
+  addedPointSpendBlock      Boolean  @default(false)
 }
 
 model Customer {

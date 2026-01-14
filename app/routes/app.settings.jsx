@@ -9,14 +9,22 @@ export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
-  const config = await db.config.findUnique({ where: { shop } });
+  const [config, discountRuleCount] = await Promise.all([
+    db.config.findUnique({ where: { shop } }),
+    db.discountRule.count({ where: { shop } }),
+  ]);
 
   return {
     config: {
-      pointsPerDollar: config?.pointsPerDollar ?? "",
+      pointsPerDollar:
+        config?.configuredPointsPerDollar === false
+          ? ""
+          : config?.pointsPerDollar ?? "",
       pointsExpirationDays: config?.pointsExpirationDays ?? "",
       isEnabled: config?.isEnabled ?? true,
+      configuredPointsPerDollar: Boolean(config?.configuredPointsPerDollar),
     },
+    hasDiscountRule: discountRuleCount > 0,
   };
 };
 
@@ -33,14 +41,17 @@ export const action = async ({ request }) => {
   const shop = session.shop;
   const formData = await request.formData();
 
-  const pointsPerDollar = parseOptionalInt(formData.get("pointsPerDollar"));
+  const pointsPerDollarField = String(formData.get("pointsPerDollar") ?? "").trim();
+  const pointsPerDollar = parseOptionalInt(pointsPerDollarField);
   const pointsExpirationDays = parseOptionalInt(
     formData.get("pointsExpirationDays"),
   );
   const isEnabled = formData.get("isEnabled") === "active";
 
+  const configuredPointsPerDollar = pointsPerDollarField !== "";
+
   const errors = {};
-  if (pointsPerDollar == null || pointsPerDollar < 0) {
+  if (configuredPointsPerDollar && (pointsPerDollar == null || pointsPerDollar < 0)) {
     errors.pointsPerDollar = "Enter a valid number (0 or higher).";
   }
 
@@ -55,18 +66,27 @@ export const action = async ({ request }) => {
     return { ok: false, errors };
   }
 
+  const storedPointsPerDollar = configuredPointsPerDollar
+    ? pointsPerDollar
+    : 0;
+  const storedPointsExpirationDays = configuredPointsPerDollar
+    ? pointsExpirationDays
+    : null;
+
   await db.config.upsert({
     where: { shop },
     update: {
-      pointsPerDollar,
-      pointsExpirationDays,
+      pointsPerDollar: storedPointsPerDollar,
+      pointsExpirationDays: storedPointsExpirationDays,
       isEnabled,
+      configuredPointsPerDollar,
     },
     create: {
       shop,
-      pointsPerDollar,
-      pointsExpirationDays,
+      pointsPerDollar: storedPointsPerDollar,
+      pointsExpirationDays: storedPointsExpirationDays,
       isEnabled,
+      configuredPointsPerDollar,
     },
   });
 
@@ -90,7 +110,7 @@ export const action = async ({ request }) => {
               namespace: "rewards"
               key: "points_per_dollar"
               type: "number_integer"
-              value: "${pointsPerDollar}"
+              value: "${storedPointsPerDollar}"
             }
           ]
         ) {
@@ -126,7 +146,7 @@ export const action = async ({ request }) => {
 export default function SettingsPage() {
   const fetcher = useFetcher();
   const shopify = useAppBridge();
-  const { config } = useLoaderData();
+  const { config, hasDiscountRule } = useLoaderData();
   const initialValues = useMemo(
     () => ({
       pointsPerDollar: String(config.pointsPerDollar),
@@ -195,6 +215,19 @@ export default function SettingsPage() {
   return (
     <s-page heading="Settings" inlineSize="small">
       <s-section>
+        {!config.configuredPointsPerDollar ? (
+          <s-banner tone="critical">
+            You need to configure how many points your customers will earn per
+            dollar spent. <s-link href="/app/settings">Go to settings.</s-link>
+          </s-banner>
+        ) : null}
+        {!hasDiscountRule ? (
+          <s-banner tone="caution">
+            You need to add at least one discount rule for your customers to
+            spend their points. This does not affect earning points.{" "}
+            <s-link href="/app/settings">Go to settings.</s-link>
+          </s-banner>
+        ) : null}
         <form data-save-bar onSubmit={handleSave} onReset={handleDiscard}>
           <s-stack direction="block" gap="base">
             <s-heading>Configuration</s-heading>
