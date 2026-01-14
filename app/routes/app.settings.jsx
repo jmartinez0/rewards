@@ -6,9 +6,10 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
-  const config = await db.config.findUnique({ where: { id: 1 } });
+  const config = await db.config.findUnique({ where: { shop } });
 
   return {
     config: {
@@ -28,7 +29,8 @@ const parseOptionalInt = (value) => {
 };
 
 export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  const shop = session.shop;
   const formData = await request.formData();
 
   const pointsPerDollar = parseOptionalInt(formData.get("pointsPerDollar"));
@@ -54,14 +56,14 @@ export const action = async ({ request }) => {
   }
 
   await db.config.upsert({
-    where: { id: 1 },
+    where: { shop },
     update: {
       pointsPerDollar,
       pointsExpirationDays,
       isEnabled,
     },
     create: {
-      id: 1,
+      shop,
       pointsPerDollar,
       pointsExpirationDays,
       isEnabled,

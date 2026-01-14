@@ -28,7 +28,8 @@ model Session {
 }
 
 model Config {
-  id                   Int      @id @default(1)
+  id                   Int      @id @default(autoincrement())
+  shop                 String   @unique
   pointsPerDollar      Int      @default(20)
   pointsExpirationDays Int?
   isEnabled            Boolean  @default(true)
@@ -37,18 +38,23 @@ model Config {
 
 model Customer {
   id                Int           @id @default(autoincrement())
-  email             String        @unique
+  shop              String
+  email             String
   name              String
-  shopifyCustomerId String?       @unique
+  shopifyCustomerId String?
   currentPoints     Int           @default(0)
   lifetimePoints    Int           @default(0)
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
   ledgerEntries     LedgerEntry[]
+
+  @@unique([shop, email])
+  @@unique([shop, shopifyCustomerId])
 }
 
 model LedgerEntry {
   id              Int           @id @default(autoincrement())
+  shop            String
   customerId      Int
   type            LedgerType
   pointsDelta     Int
@@ -61,15 +67,20 @@ model LedgerEntry {
   customer        Customer      @relation(fields: [customerId], references: [id])
   sourceLot       LedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
   depletions      LedgerEntry[] @relation("RelatedEarn")
+
+  @@index([shop])
 }
 
 model DiscountRule {
   id         Int      @id @default(autoincrement())
-  minPoints  Int      @unique
+  shop       String
+  minPoints  Int
   percentOff Int
   isEnabled  Boolean  @default(true)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+
+  @@unique([shop, minPoints])
 }
 
 enum LedgerType {

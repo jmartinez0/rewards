@@ -84,7 +84,7 @@ export const loader = async ({ request }) => {
 
   const shopDomain = sessionToken.dest;
 
-  const config = await db.config.findUnique({ where: { id: 1 } });
+  const config = await db.config.findUnique({ where: { shop: shopDomain } });
   if (!config?.isEnabled) {
     logPointsApi("Skipping (rewards disabled)", { shopDomain });
     return new Response(JSON.stringify({ pointsEarned: 0 }), {

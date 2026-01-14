@@ -157,7 +157,7 @@ function PointsEarnedBanner() {
     extension && extension.scriptUrl ? extension.scriptUrl : null,
   ]);
 
-  if (pointsEarned == null) {
+  if (pointsEarned == null || pointsEarned <= 0) {
     return null;
   }
 

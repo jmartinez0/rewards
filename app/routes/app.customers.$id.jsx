@@ -8,16 +8,18 @@ import db from "../db.server";
 
 export const loader = async ({ request, params }) => {
   const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
   const id = Number.parseInt(params.id, 10);
   if (Number.isNaN(id)) {
     throw new Response("Invalid customer id", { status: 400 });
   }
 
-  const customer = await db.customer.findUnique({
-    where: { id },
+  const customer = await db.customer.findFirst({
+    where: { id, shop },
     include: {
       ledgerEntries: {
+        where: { shop },
         orderBy: { createdAt: "desc" },
         include: {
           sourceLot: true,
@@ -39,7 +41,8 @@ export const loader = async ({ request, params }) => {
 };
 
 export const action = async ({ request, params }) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
 
   const id = Number.parseInt(params.id, 10);
   if (Number.isNaN(id)) {
@@ -67,7 +70,7 @@ export const action = async ({ request, params }) => {
     errors.reason = "Reason is required";
   }
 
-  const customer = await db.customer.findUnique({ where: { id } });
+  const customer = await db.customer.findFirst({ where: { id, shop } });
   if (!customer) {
     throw new Response("Customer not found", { status: 404 });
   }
@@ -88,7 +91,7 @@ export const action = async ({ request, params }) => {
     return { ok: false, errors };
   }
 
-  const config = await db.config.findUnique({ where: { id: 1 } });
+  const config = await db.config.findUnique({ where: { shop } });
   const now = new Date();
   const expiresAt =
     adjustmentType === "increase" && config?.pointsExpirationDays
@@ -102,6 +105,7 @@ export const action = async ({ request, params }) => {
   await db.$transaction(async (tx) => {
     await tx.ledgerEntry.create({
       data: {
+        shop,
         customerId: customer.id,
         type: "ADJUST",
         pointsDelta,

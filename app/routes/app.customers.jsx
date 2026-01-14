@@ -5,7 +5,8 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
+  const shop = session.shop;
   const url = new URL(request.url);
   const query = (url.searchParams.get("q") || "").trim();
   const pageParam = Number.parseInt(url.searchParams.get("page") || "1", 10);
@@ -28,12 +29,14 @@ export const loader = async ({ request }) => {
     }
     : undefined;
 
+  const where = searchTerms ? { shop, ...searchTerms } : { shop };
+
   const total = await db.customer.count({
-    where: searchTerms,
+    where,
   });
 
   const customers = await db.customer.findMany({
-    where: searchTerms,
+    where,
     orderBy: { createdAt: "desc" },
     take: pageSize,
     skip: (page - 1) * pageSize,
