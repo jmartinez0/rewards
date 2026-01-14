@@ -14,10 +14,10 @@ export const loader = async ({ request, params }) => {
     throw new Response("Invalid customer id", { status: 400 });
   }
 
-  const customer = await db.rewardsCustomer.findUnique({
+  const customer = await db.customer.findUnique({
     where: { id },
     include: {
-      rewardsLedgerEntries: {
+      ledgerEntries: {
         orderBy: { createdAt: "desc" },
         include: {
           sourceLot: true,
@@ -67,7 +67,7 @@ export const action = async ({ request, params }) => {
     errors.reason = "Reason is required";
   }
 
-  const customer = await db.rewardsCustomer.findUnique({ where: { id } });
+  const customer = await db.customer.findUnique({ where: { id } });
   if (!customer) {
     throw new Response("Customer not found", { status: 404 });
   }
@@ -88,7 +88,7 @@ export const action = async ({ request, params }) => {
     return { ok: false, errors };
   }
 
-  const config = await db.rewardsConfig.findUnique({ where: { id: 1 } });
+  const config = await db.config.findUnique({ where: { id: 1 } });
   const now = new Date();
   const expiresAt =
     adjustmentType === "increase" && config?.pointsExpirationDays
@@ -100,9 +100,9 @@ export const action = async ({ request, params }) => {
   const pointsDelta = adjustmentType === "decrease" ? -adjustBy : adjustBy;
 
   await db.$transaction(async (tx) => {
-    await tx.rewardsLedgerEntry.create({
+    await tx.ledgerEntry.create({
       data: {
-        rewardsCustomerId: customer.id,
+        customerId: customer.id,
         type: "ADJUST",
         pointsDelta,
         remainingPoints: pointsDelta > 0 ? pointsDelta : null,
@@ -112,7 +112,7 @@ export const action = async ({ request, params }) => {
       },
     });
 
-    await tx.rewardsCustomer.update({
+    await tx.customer.update({
       where: { id: customer.id },
       data: {
         currentPoints:
@@ -139,8 +139,8 @@ export default function CustomerDetails() {
   const [adjustReason, setAdjustReason] = useState("");
   const [adjustTouched, setAdjustTouched] = useState(false);
 
-  const ledgerEntries = Array.isArray(customer.rewardsLedgerEntries)
-    ? customer.rewardsLedgerEntries
+  const ledgerEntries = Array.isArray(customer.ledgerEntries)
+    ? customer.ledgerEntries
     : [];
 
   const historyRows = buildHistoryRows(ledgerEntries);
@@ -548,7 +548,7 @@ function getAfterAdjustmentPoints({ adjustmentType, currentPoints, adjustBy }) {
 }
 
 function formatDateMMDDYYYY(value) {
-  if (value == null) return "—";
+  if (value == null) return "Never";
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
 

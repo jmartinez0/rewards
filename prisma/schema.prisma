@@ -27,7 +27,7 @@ model Session {
   refreshTokenExpires DateTime?
 }
 
-model RewardsConfig {
+model Config {
   id                   Int      @id @default(1)
   pointsPerDollar      Int      @default(20)
   pointsExpirationDays Int?
@@ -35,32 +35,41 @@ model RewardsConfig {
   updatedAt            DateTime @updatedAt
 }
 
-model RewardsCustomer {
-  id                   Int                  @id @default(autoincrement())
-  email                String               @unique
-  name                 String
-  shopifyCustomerId    String?              @unique
-  currentPoints        Int                  @default(0)
-  lifetimePoints       Int                  @default(0)
-  createdAt            DateTime             @default(now())
-  updatedAt            DateTime             @updatedAt
-  rewardsLedgerEntries RewardsLedgerEntry[]
+model Customer {
+  id                Int           @id @default(autoincrement())
+  email             String        @unique
+  name              String
+  shopifyCustomerId String?       @unique
+  currentPoints     Int           @default(0)
+  lifetimePoints    Int           @default(0)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  ledgerEntries     LedgerEntry[]
 }
 
-model RewardsLedgerEntry {
-  id                Int                  @id @default(autoincrement())
-  rewardsCustomerId Int
-  type              LedgerType
-  pointsDelta       Int
-  remainingPoints   Int?
-  expiresAt         DateTime?
-  orderId           String?
-  sourceLotId       Int?
-  notes             String?
-  createdAt         DateTime             @default(now())
-  rewardsCustomer   RewardsCustomer      @relation(fields: [rewardsCustomerId], references: [id])
-  sourceLot         RewardsLedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
-  depletions        RewardsLedgerEntry[] @relation("RelatedEarn")
+model LedgerEntry {
+  id              Int           @id @default(autoincrement())
+  customerId      Int
+  type            LedgerType
+  pointsDelta     Int
+  remainingPoints Int?
+  expiresAt       DateTime?
+  orderId         String?
+  sourceLotId     Int?
+  notes           String?
+  createdAt       DateTime      @default(now())
+  customer        Customer      @relation(fields: [customerId], references: [id])
+  sourceLot       LedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
+  depletions      LedgerEntry[] @relation("RelatedEarn")
+}
+
+model DiscountRule {
+  id         Int      @id @default(autoincrement())
+  minPoints  Int      @unique
+  percentOff Int
+  isEnabled  Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 enum LedgerType {

@@ -8,7 +8,9 @@ import {
   useSubscription,
 } from "@shopify/ui-extensions/checkout/preact";
 
-const DEFAULT_APP_URL = "https://jm-rewards.vercel.app";
+const DEFAULT_APP_URL = "https://jm-rewards-staging.vercel.app";
+
+const loadedOrders = new Set();
 
 export default function extension() {
   render(<PointsEarnedBanner />, document.body);
@@ -21,38 +23,85 @@ function PointsEarnedBanner() {
   const settings = useSettings();
   const [pointsEarned, setPointsEarned] = useState(null);
 
+  const extension = api.extension;
+  let isPreviewContext = false;
+  try {
+    // Prevent extension from displaying twice during development
+    if (extension && extension.scriptUrl) {
+      const url = new URL(extension.scriptUrl);
+      const hostname = url.hostname;
+      const version = extension.version;
+
+      const isCdnHost = hostname.endsWith("extensions.shopifycdn.com");
+      const isDevVersion =
+        typeof version === "string" && version.startsWith("dev-");
+      isPreviewContext = isCdnHost && isDevVersion;
+    }
+  } catch (e) {
+    console.log("Failed to parse scriptUrl for context", e);
+  }
+
   useEffect(() => {
-    const orderId = orderConfirmation?.order?.id;
+    const orderId = orderConfirmation && orderConfirmation.order
+      ? orderConfirmation.order.id
+      : null;
+
     if (!orderId || !rawSessionToken) {
       return;
     }
 
+    if (isPreviewContext) {
+      console.log("Skipping points fetch in preview/CDN dev context",
+        {
+          scriptUrl: extension && extension.scriptUrl,
+          orderId,
+        },
+      );
+      return;
+    }
+
+    if (loadedOrders.has(orderId)) {
+      console.log("[JM Rewards] Points already loaded for order in this sandbox", { orderId });
+      return;
+    }
+    loadedOrders.add(orderId);
+
     let cancelled = false;
-    const appUrl = String(settings?.app_url ?? DEFAULT_APP_URL).replace(/\/$/, "");
+    let appUrl = String(settings && settings.app_url ? settings.app_url : DEFAULT_APP_URL).trim();
+    if (!/^https?:\/\//i.test(appUrl)) {
+      appUrl = `https://${appUrl}`;
+    }
+    appUrl = appUrl.replace(/\/$/, "");
 
     const loadPointsWithRetry = async () => {
       try {
         let tokenString;
         if (typeof rawSessionToken === "string") {
           tokenString = rawSessionToken;
-        } else if (typeof rawSessionToken.get === "function") {
+        } else if (
+          rawSessionToken &&
+          typeof rawSessionToken.get === "function"
+        ) {
           tokenString = await rawSessionToken.get();
         } else {
-          console.warn("Unexpected sessionToken type:", rawSessionToken);
+          console.log("Unexpected sessionToken type:", rawSessionToken);
           return;
         }
 
         if (!tokenString) {
-          console.warn("Empty session token");
+          console.log("Empty session token");
           return;
         }
 
         const makeRequest = async () => {
-          const url = `${appUrl}/api/points-earned?orderId=${encodeURIComponent(
-            orderId,
-          )}&sessionToken=${encodeURIComponent(tokenString)}`;
+          const url = new URL("/api/points-earned", appUrl);
+          url.searchParams.set("orderId", orderId);
 
-          const res = await fetch(url);
+          const res = await fetch(url.toString(), {
+            headers: {
+              Authorization: `Bearer ${tokenString}`,
+            },
+          });
           if (!res.ok) {
             console.warn("Points API not OK:", res.status);
             return null;
@@ -66,14 +115,14 @@ function PointsEarnedBanner() {
         };
 
         const maxAttempts = 10;
-        const delayMs = 300;
+        const delayMs = 250;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           if (cancelled) return;
 
           const pts = await makeRequest();
 
-          if (pts && pts > 0) {
+          if (typeof pts === "number" && pts > 0) {
             if (!cancelled) {
               setPointsEarned(pts);
             }
@@ -98,7 +147,15 @@ function PointsEarnedBanner() {
     return () => {
       cancelled = true;
     };
-  }, [orderConfirmation?.order?.id, rawSessionToken, settings?.app_url]);
+  }, [
+    orderConfirmation && orderConfirmation.order
+      ? orderConfirmation.order.id
+      : null,
+    rawSessionToken,
+    settings && settings.app_url ? settings.app_url : null,
+    isPreviewContext,
+    extension && extension.scriptUrl ? extension.scriptUrl : null,
+  ]);
 
   if (pointsEarned == null) {
     return null;

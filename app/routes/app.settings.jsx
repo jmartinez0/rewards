@@ -8,11 +8,11 @@ import db from "../db.server";
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
 
-  const config = await db.rewardsConfig.findUnique({ where: { id: 1 } });
+  const config = await db.config.findUnique({ where: { id: 1 } });
 
   return {
     config: {
-      pointsPerDollar: config?.pointsPerDollar ?? 20,
+      pointsPerDollar: config?.pointsPerDollar ?? "",
       pointsExpirationDays: config?.pointsExpirationDays ?? "",
       isEnabled: config?.isEnabled ?? true,
     },
@@ -53,7 +53,7 @@ export const action = async ({ request }) => {
     return { ok: false, errors };
   }
 
-  await db.rewardsConfig.upsert({
+  await db.config.upsert({
     where: { id: 1 },
     update: {
       pointsPerDollar,
@@ -195,10 +195,12 @@ export default function SettingsPage() {
       <s-section>
         <form data-save-bar onSubmit={handleSave} onReset={handleDiscard}>
           <s-stack direction="block" gap="base">
+            <s-heading>Configuration</s-heading>
             <s-text-field
               label="Points per dollar"
               name="pointsPerDollar"
               value={pointsPerDollar}
+              placeholder="Enter a whole number"
               error={errors.pointsPerDollar}
               onChange={(event) => setPointsPerDollar(event.currentTarget.value)}
             />
@@ -229,6 +231,37 @@ export default function SettingsPage() {
             </s-select>
           </s-stack>
         </form>
+      </s-section>
+
+      <s-section>
+        <s-stack gap="base">
+
+
+          <s-heading>Discount rules</s-heading>
+          <s-button commandFor="addNewRule">Add new discount rule</s-button>
+        </s-stack>
+        <s-modal id="addNewRule" heading="Add new discount rule">
+          <s-stack gap="base">
+            <s-text-field
+              label="Points required to get discount"
+              name="pointsForDiscount"
+            ></s-text-field>
+
+            <s-text-field
+              label="Percentage off order"
+              name="percentOff"
+            ></s-text-field></s-stack>
+
+          <s-button slot="secondary-actions" commandFor="adjustPoints" command="--hide">
+            Close
+          </s-button>
+          <s-button
+            slot="primary-action"
+            variant="primary"
+          >
+            Save
+          </s-button>
+        </s-modal>
       </s-section>
     </s-page>
   );

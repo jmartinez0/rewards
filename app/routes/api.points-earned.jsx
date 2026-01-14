@@ -1,9 +1,14 @@
 import { authenticate, unauthenticated } from "../shopify.server";
+import db from "../db.server";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+const logPointsApi = (...args) => {
+  console.log("[points-earned]", ...args);
 };
 
 const parseMoneyToCents = (amount) => {
@@ -25,7 +30,19 @@ export const loader = async ({ request }) => {
 
   const url = new URL(request.url);
   const rawOrderId = url.searchParams.get("orderId");
-  const rawSessionToken = url.searchParams.get("sessionToken");
+  const authHeader = request.headers.get("authorization");
+  const rawSessionToken = authHeader?.startsWith("Bearer ")
+    ? authHeader.slice("Bearer ".length)
+    : null;
+
+  logPointsApi("request", {
+    method: request.method,
+    url: request.url,
+    origin: request.headers.get("origin"),
+    referer: request.headers.get("referer"),
+    hasAuthorization: Boolean(authHeader),
+    orderId: rawOrderId,
+  });
 
   if (!rawOrderId) {
     return new Response(JSON.stringify({ error: "Missing orderId" }), {
@@ -49,17 +66,11 @@ export const loader = async ({ request }) => {
 
   let sessionToken;
   try {
-    const fakeRequest = new Request(request.url, {
-      headers: {
-        authorization: `Bearer ${rawSessionToken}`,
-      },
-    });
-
-    const result = await authenticate.public.checkout(fakeRequest);
+    const result = await authenticate.public.checkout(request);
     sessionToken = result.sessionToken;
   } catch (error) {
     console.error(
-      "Points earned API: authenticate.public.checkout (synthetic) failed:",
+      "Points earned API: authenticate.public.checkout failed:",
       error,
     );
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -72,6 +83,19 @@ export const loader = async ({ request }) => {
   }
 
   const shopDomain = sessionToken.dest;
+
+  const config = await db.config.findUnique({ where: { id: 1 } });
+  if (!config?.isEnabled) {
+    logPointsApi("Skipping (rewards disabled)", { shopDomain });
+    return new Response(JSON.stringify({ pointsEarned: 0 }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...CORS_HEADERS,
+      },
+    });
+  }
+
   let adminClient;
 
   try {
@@ -99,8 +123,19 @@ export const loader = async ({ request }) => {
     : rawOrderId;
 
   try {
-    const adminResponse = await adminClient.graphql(`
-      query PointsData($orderId: ID!) {
+    const configQuery = `
+      query RewardsConfig {
+        shop {
+          metafield(namespace: "rewards", key: "points_per_dollar") {
+            type
+            value
+          }
+        }
+      }
+    `;
+
+    const orderQuery = `
+      query OrderTotal($orderId: ID!) {
         order(id: $orderId) {
           id
           currentTotalPriceSet {
@@ -110,27 +145,35 @@ export const loader = async ({ request }) => {
             }
           }
         }
-        shop {
-          metafield(namespace: "rewards", key: "points_per_dollar") {
-            type
-            value
-          }
-        }
       }
-    `,
-      {
-        variables: { orderId: adminOrderId },
-      },
-    );
+    `;
 
-    const json = await adminResponse.json();
-    const order = json?.data?.order;
-    const metafield = json?.data?.shop?.metafield;
+    const [configResponse, orderResponse] = await Promise.all([
+      adminClient.graphql(configQuery),
+      adminClient.graphql(orderQuery, { variables: { orderId: adminOrderId } }),
+    ]);
+
+    const [configJson, orderJson] = await Promise.all([
+      configResponse.json(),
+      orderResponse.json(),
+    ]);
+
+    logPointsApi("graphql:configResult", {
+      data: configJson?.data,
+      errors: configJson?.errors,
+    });
+    logPointsApi("graphql:orderResult", {
+      data: orderJson?.data,
+      errors: orderJson?.errors,
+    });
+
+    const order = orderJson?.data?.order;
+    const metafield = configJson?.data?.shop?.metafield;
 
     if (!order || !metafield) {
       console.warn(
         "Points earned API: missing order or metafield: ",
-        JSON.stringify(json),
+        JSON.stringify({ config: configJson, order: orderJson }),
       );
       return new Response(JSON.stringify({ pointsEarned: 0 }), {
         status: 200,
@@ -160,6 +203,14 @@ export const loader = async ({ request }) => {
 
     const orderTotalCents = parseMoneyToCents(totalAmount);
     const points = Math.floor((orderTotalCents * pointsPerDollar) / 100);
+
+    logPointsApi("math", {
+      orderId: adminOrderId,
+      totalAmount,
+      orderTotalCents,
+      pointsPerDollar,
+      points,
+    });
 
     return new Response(JSON.stringify({ pointsEarned: points }), {
       status: 200,

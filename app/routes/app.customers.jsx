@@ -28,11 +28,11 @@ export const loader = async ({ request }) => {
     }
     : undefined;
 
-  const total = await db.rewardsCustomer.count({
+  const total = await db.customer.count({
     where: searchTerms,
   });
 
-  const customers = await db.rewardsCustomer.findMany({
+  const customers = await db.customer.findMany({
     where: searchTerms,
     orderBy: { createdAt: "desc" },
     take: pageSize,
@@ -114,8 +114,10 @@ export default function Customers() {
   return (
     <s-page heading="Customers">
       {totalCustomers === 0 && !query ? (
-        <s-section padding="none">
-          <s-paragraph>No rewards customers found.</s-paragraph>
+        <s-section padding="base">
+          <s-paragraph>No rewards customers found yet.</s-paragraph>
+          <s-paragraph><strong>Before customers can be rewarded</strong>, go to <s-link href="/app/settings">settings</s-link> and save your custom configuration.</s-paragraph>
+          <s-paragraph><strong>After your configuration is saved</strong>, when a customer places a new order, their rewards account will be created automatically.</s-paragraph>
         </s-section>
       ) : (
         <s-stack direction="block" gap="base">

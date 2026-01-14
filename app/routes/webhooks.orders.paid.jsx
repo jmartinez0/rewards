@@ -1,6 +1,14 @@
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+const logWebhook = (...args) => {
+  console.log("[orders/paid]", ...args);
+};
+
+const logWebhookError = (...args) => {
+  console.error("[orders/paid]", ...args);
+};
+
 const parseMoneyToCents = (amount) => {
   if (amount == null) {
     return 0;
@@ -76,11 +84,15 @@ const parseOrderDate = (value) => {
 };
 
 export const action = async ({ request }) => {
+  const requestId = crypto?.randomUUID?.() ?? String(Date.now());
+  const startedAt = Date.now();
+
   const { payload, session, topic, shop } = await authenticate.webhook(request);
 
-  console.log(`Received ${topic} webhook for ${shop}`);
+  logWebhook("Received", { requestId, topic, shop, hasSession: Boolean(session) });
 
   if (!session) {
+    logWebhook("skipping (no session)", { requestId });
     return new Response();
   }
 
@@ -88,12 +100,24 @@ export const action = async ({ request }) => {
   const email = getOrderEmail(order);
   const orderId = getOrderId(order);
 
+  logWebhook("Parsed payload", {
+    requestId,
+    orderId,
+    emailPresent: Boolean(email),
+    processedAt: order?.processed_at ?? null,
+    createdAt: order?.created_at ?? null,
+    totalPrice: order?.total_price ?? null,
+    totalPriceSetAmount: order?.total_price_set?.shop_money?.amount ?? null,
+  });
+
   if (!email || !orderId) {
+    logWebhook("skipping (missing email or orderId)", { requestId });
     return new Response();
   }
 
-  const config = await db.rewardsConfig.findUnique({ where: { id: 1 } });
+  const config = await db.config.findUnique({ where: { id: 1 } });
   if (!config?.isEnabled) {
+    logWebhook("skipping (rewards disabled)", { requestId });
     return new Response();
   }
 
@@ -104,7 +128,16 @@ export const action = async ({ request }) => {
     (orderTotalCents * config.pointsPerDollar) / 100,
   );
 
+  logWebhook("Computed points", {
+    requestId,
+    pointsPerDollar: config.pointsPerDollar,
+    pointsExpirationDays: config.pointsExpirationDays ?? null,
+    orderTotalCents,
+    points,
+  });
+
   if (points <= 0) {
+    logWebhook("skipping (points <= 0)", { requestId, points });
     return new Response();
   }
 
@@ -118,64 +151,105 @@ export const action = async ({ request }) => {
   const shopifyCustomerId = getCustomerId(order);
   const name = getOrderName(order);
 
-  await db.$transaction(async (tx) => {
-    const existingEarn = await tx.rewardsLedgerEntry.findFirst({
-      where: {
-        type: "EARN",
-        orderId,
-      },
-    });
+  try {
+    await db.$transaction(async (tx) => {
+      const existingEarn = await tx.ledgerEntry.findFirst({
+        where: {
+          type: "EARN",
+          orderId,
+        },
+      });
 
-    if (existingEarn) {
-      return;
-    }
+      if (existingEarn) {
+        logWebhook("skipping (earn already exists)", {
+          requestId,
+          existingEarnId: existingEarn.id,
+        });
+        return;
+      }
 
-    let rewardsCustomer = await tx.rewardsCustomer.findUnique({
-      where: { email },
-    });
+      let customer = await tx.customer.findUnique({
+        where: { email },
+      });
 
-    if (!rewardsCustomer) {
-      rewardsCustomer = await tx.rewardsCustomer.create({
-        data: {
+      if (!customer) {
+        logWebhook("creating customer", {
+          requestId,
           email,
-          shopifyCustomerId,
-          name,
-        },
+          hasShopifyCustomerId: Boolean(shopifyCustomerId),
+          hasName: Boolean(name),
+        });
+        customer = await tx.customer.create({
+          data: {
+            email,
+            shopifyCustomerId,
+            name,
+          },
+        });
+      } else if (!customer.shopifyCustomerId && shopifyCustomerId) {
+        logWebhook("updating customer shopifyCustomerId", {
+          requestId,
+          customerId: customer.id,
+          hasNameUpdate: Boolean(name && name !== customer.name),
+        });
+        customer = await tx.customer.update({
+          where: { id: customer.id },
+          data: {
+            shopifyCustomerId,
+            ...(name && name !== customer.name ? { name } : {}),
+          },
+        });
+      } else if (name && name !== customer.name) {
+        logWebhook("updating customer name", {
+          requestId,
+          customerId: customer.id,
+        });
+        customer = await tx.customer.update({
+          where: { id: customer.id },
+          data: { name },
+        });
+      }
+
+      logWebhook("Creating earn ledger entry", {
+        requestId,
+        customerId: customer.id,
+        points,
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        earnedAt: earnedAt.toISOString(),
+        orderId,
       });
-    } else if (!rewardsCustomer.shopifyCustomerId && shopifyCustomerId) {
-      rewardsCustomer = await tx.rewardsCustomer.update({
-        where: { id: rewardsCustomer.id },
+
+      await tx.ledgerEntry.create({
         data: {
-          shopifyCustomerId,
-          ...(name && name !== rewardsCustomer.name ? { name } : {}),
+          customerId: customer.id,
+          type: "EARN",
+          pointsDelta: points,
+          remainingPoints: points,
+          expiresAt,
+          orderId,
         },
       });
-    } else if (name && name !== rewardsCustomer.name) {
-      rewardsCustomer = await tx.rewardsCustomer.update({
-        where: { id: rewardsCustomer.id },
-        data: { name },
+
+      await tx.customer.update({
+        where: { id: customer.id },
+        data: {
+          currentPoints: { increment: points },
+          lifetimePoints: { increment: points },
+        },
       });
-    }
-
-    await tx.rewardsLedgerEntry.create({
-      data: {
-        rewardsCustomerId: rewardsCustomer.id,
-        type: "EARN",
-        pointsDelta: points,
-        remainingPoints: points,
-        expiresAt,
-        orderId
-      },
     });
-
-    await tx.rewardsCustomer.update({
-      where: { id: rewardsCustomer.id },
-      data: {
-        currentPoints: { increment: points },
-        lifetimePoints: { increment: points },
-      },
+  } catch (error) {
+    logWebhookError("transaction failed", {
+      requestId,
+      orderId,
+      email,
+      elapsedMs: Date.now() - startedAt,
+      error: error?.message ?? String(error),
     });
-  });
+    throw error;
+  }
+
+  logWebhook("Done", { requestId, elapsedMs: Date.now() - startedAt });
 
   return new Response();
 };
