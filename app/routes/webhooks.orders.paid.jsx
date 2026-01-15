@@ -1,4 +1,4 @@
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import db from "../db.server";
 
 const logWebhook = (...args) => {
@@ -83,6 +83,65 @@ const parseOrderDate = (value) => {
   return parsed;
 };
 
+const getCustomerGid = (shopifyCustomerId) => {
+  if (!shopifyCustomerId) return null;
+  const raw = String(shopifyCustomerId);
+  if (raw.startsWith("gid://shopify/Customer/")) return raw;
+  const match = raw.match(/(\d+)$/);
+  return match ? `gid://shopify/Customer/${match[1]}` : null;
+};
+
+const setCustomerCurrentPointsMetafield = async ({
+  shopDomain,
+  shopifyCustomerId,
+  currentPoints,
+}) => {
+  const ownerId = getCustomerGid(shopifyCustomerId);
+  if (!ownerId) return;
+
+  try {
+    const { admin } = await unauthenticated.admin(shopDomain);
+    const mutation = `
+      mutation SetCustomerPoints($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const response = await admin.graphql(mutation, {
+      variables: {
+        metafields: [
+          {
+            ownerId,
+            namespace: "rewards",
+            key: "current_points",
+            type: "number_integer",
+            value: String(currentPoints),
+          },
+        ],
+      },
+    });
+
+    const json = await response.json();
+    const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      logWebhookError("Failed to set customer current_points metafield", {
+        ownerId,
+        userErrors,
+      });
+    }
+  } catch (error) {
+    logWebhookError("Error setting customer current_points metafield", {
+      ownerId,
+      error: error?.message ?? String(error),
+    });
+  }
+};
+
 export const action = async ({ request }) => {
   const requestId = crypto?.randomUUID?.() ?? String(Date.now());
   const startedAt = Date.now();
@@ -151,8 +210,10 @@ export const action = async ({ request }) => {
   const shopifyCustomerId = getCustomerId(order);
   const name = getOrderName(order) ?? email;
 
+  let updatedCustomerForMetafield = null;
+
   try {
-    await db.$transaction(async (tx) => {
+    updatedCustomerForMetafield = await db.$transaction(async (tx) => {
       const existingEarn = await tx.ledgerEntry.findFirst({
         where: {
           type: "EARN",
@@ -165,7 +226,7 @@ export const action = async ({ request }) => {
           requestId,
           existingEarnId: existingEarn.id,
         });
-        return;
+        return null;
       }
 
       let customer = await tx.customer.findFirst({ where: { email } });
@@ -228,13 +289,19 @@ export const action = async ({ request }) => {
         },
       });
 
-      await tx.customer.update({
+      const updatedCustomer = await tx.customer.update({
         where: { id: customer.id },
         data: {
           currentPoints: { increment: points },
           lifetimePoints: { increment: points },
         },
+        select: {
+          currentPoints: true,
+          shopifyCustomerId: true,
+        },
       });
+
+      return updatedCustomer;
     });
   } catch (error) {
     logWebhookError("transaction failed", {
@@ -248,6 +315,14 @@ export const action = async ({ request }) => {
   }
 
   logWebhook("Done", { requestId, elapsedMs: Date.now() - startedAt });
+
+  if (updatedCustomerForMetafield) {
+    await setCustomerCurrentPointsMetafield({
+      shopDomain: shop,
+      shopifyCustomerId: updatedCustomerForMetafield.shopifyCustomerId,
+      currentPoints: updatedCustomerForMetafield.currentPoints,
+    });
+  }
 
   return new Response();
 };

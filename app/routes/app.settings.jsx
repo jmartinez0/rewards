@@ -49,12 +49,11 @@ export const action = async ({ request }) => {
 
   const getDiscountRulesPayload = (rules) => {
     return {
-      discountRules: rules
-        .filter((rule) => rule.isActive)
-        .map((rule) => ({
-          points: rule.points,
-          percentOff: rule.percentOff,
-        })),
+      discountRules: rules.map((rule) => ({
+        points: rule.points,
+        percentOff: rule.percentOff,
+        isActive: Boolean(rule.isActive),
+      })),
     };
   };
 
@@ -119,7 +118,7 @@ export const action = async ({ request }) => {
     if (percentOff == null) {
       errors.percentOff = "Must be a number";
     } else if (!Number.isInteger(percentOff) || percentOff < 1 || percentOff > 100) {
-      errors.percentOff = "Must be a whole number (1-100).";
+      errors.percentOff = "Must be between 1-100%.";
     }
 
     return errors;
@@ -145,7 +144,7 @@ export const action = async ({ request }) => {
           return {
             ok: false,
             intent,
-            errors: { points: "A rule with this points value already exists." },
+            errors: { points: "A rule with this points value already " },
           };
         }
 
@@ -169,7 +168,7 @@ export const action = async ({ request }) => {
           return {
             ok: false,
             intent,
-            errors: { points: "A rule with this points value already exists." },
+            errors: { points: "A rule with this points value already exists" },
           };
         }
 
@@ -192,7 +191,7 @@ export const action = async ({ request }) => {
         return {
           ok: false,
           intent,
-          errors: { points: "A rule with this points value already exists." },
+          errors: { points: "A rule with this points value already exists" },
         };
       }
       console.error("Discount rule mutation failed:", error);
@@ -496,7 +495,7 @@ export default function SettingsPage() {
     const duplicate = discountRules.some(
       (rule) => rule.points === points && rule.id !== excludeRuleId,
     );
-    if (duplicate) return "A rule with this points value already exists.";
+    if (duplicate) return "A rule with this points value already exists";
     return "";
   };
 
@@ -511,7 +510,7 @@ export default function SettingsPage() {
       percentOff < 1 ||
       percentOff > 100
     ) {
-      return "Must be a whole number (1-100).";
+      return "Must be between 1-100%";
     }
     return "";
   };
@@ -593,6 +592,13 @@ export default function SettingsPage() {
     setEditPercentOff(String(rule.percentOff));
     setEditStatus(rule.isActive ? "active" : "inactive");
     setEditRuleTouched(false);
+  };
+
+  const openEditDiscountRule = (rule) => {
+    startEditingRule(rule);
+    const modalEl = document.getElementById("editDiscountRule");
+    if (!modalEl || typeof modalEl.showOverlay !== "function") return;
+    setTimeout(() => modalEl.showOverlay(), 0);
   };
 
   const isRulesSubmitting = rulesFetcher.state !== "idle";
@@ -685,8 +691,7 @@ export default function SettingsPage() {
                       <s-button
                         icon="edit"
                         variant="tertiary"
-                        commandFor="editDiscountRule"
-                        onClick={() => startEditingRule(rule)}
+                        onClick={() => openEditDiscountRule(rule)}
                         accessibilityLabel="Edit discount rule"
                       />
                       <s-button

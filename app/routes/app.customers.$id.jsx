@@ -6,6 +6,64 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
+const getCustomerGid = (shopifyCustomerId) => {
+  if (!shopifyCustomerId) return null;
+  const raw = String(shopifyCustomerId);
+  if (raw.startsWith("gid://shopify/Customer/")) return raw;
+  const match = raw.match(/(\d+)$/);
+  return match ? `gid://shopify/Customer/${match[1]}` : null;
+};
+
+const setCustomerCurrentPointsMetafield = async ({
+  admin,
+  shopifyCustomerId,
+  currentPoints,
+}) => {
+  const ownerId = getCustomerGid(shopifyCustomerId);
+  if (!ownerId) return;
+
+  try {
+    const mutation = `
+      mutation SetCustomerPoints($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const response = await admin.graphql(mutation, {
+      variables: {
+        metafields: [
+          {
+            ownerId,
+            namespace: "rewards",
+            key: "current_points",
+            type: "number_integer",
+            value: String(currentPoints),
+          },
+        ],
+      },
+    });
+
+    const json = await response.json();
+    const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      console.error("Failed to set customer current_points metafield", {
+        ownerId,
+        userErrors,
+      });
+    }
+  } catch (error) {
+    console.error("Error setting customer current_points metafield", {
+      ownerId,
+      error: error?.message ?? String(error),
+    });
+  }
+};
+
 export const loader = async ({ request, params }) => {
   const { session } = await authenticate.admin(request);
 
@@ -39,7 +97,7 @@ export const loader = async ({ request, params }) => {
 };
 
 export const action = async ({ request, params }) => {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
   const id = Number.parseInt(params.id, 10);
   if (Number.isNaN(id)) {
@@ -98,6 +156,7 @@ export const action = async ({ request, params }) => {
       : null;
 
   const pointsDelta = adjustmentType === "decrease" ? -adjustBy : adjustBy;
+  const nextCurrentPoints = customer.currentPoints + pointsDelta;
 
   await db.$transaction(async (tx) => {
     await tx.ledgerEntry.create({
@@ -122,6 +181,12 @@ export const action = async ({ request, params }) => {
         ...(pointsDelta > 0 ? { lifetimePoints: { increment: pointsDelta } } : {}),
       },
     });
+  });
+
+  await setCustomerCurrentPointsMetafield({
+    admin,
+    shopifyCustomerId: customer.shopifyCustomerId,
+    currentPoints: nextCurrentPoints,
   });
 
   return { ok: true, savedAt: Date.now() };
