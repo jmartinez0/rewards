@@ -84,8 +84,8 @@ export const loader = async ({ request }) => {
 
   const shopDomain = sessionToken.dest;
 
-  const config = await db.config.findUnique({ where: { shop: shopDomain } });
-  if (!config?.isEnabled) {
+  const config = await db.config.findFirst({ orderBy: { id: "asc" } });
+  if (!config?.isActive || !config?.configuredPointsPerDollar) {
     logPointsApi("Skipping (rewards disabled)", { shopDomain });
     return new Response(JSON.stringify({ pointsEarned: 0 }), {
       status: 200,

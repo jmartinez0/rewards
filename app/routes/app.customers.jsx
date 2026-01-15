@@ -5,8 +5,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
-  const shop = session.shop;
+  await authenticate.admin(request);
   const url = new URL(request.url);
   const query = (url.searchParams.get("q") || "").trim();
   const pageParam = Number.parseInt(url.searchParams.get("page") || "1", 10);
@@ -29,11 +28,11 @@ export const loader = async ({ request }) => {
     }
     : undefined;
 
-  const where = searchTerms ? { shop, ...searchTerms } : { shop };
+  const where = searchTerms ?? {};
 
   const [totalAllCustomers, total, customers, config, discountRuleCount] =
     await Promise.all([
-      db.customer.count({ where: { shop } }),
+      db.customer.count(),
       db.customer.count({ where }),
       db.customer.findMany({
         where,
@@ -41,8 +40,8 @@ export const loader = async ({ request }) => {
         take: pageSize,
         skip: (page - 1) * pageSize,
       }),
-      db.config.findUnique({ where: { shop } }),
-      db.discountRule.count({ where: { shop } }),
+      db.config.findFirst({ orderBy: { id: "asc" } }),
+      db.discountRule.count(),
     ]);
 
   return {
@@ -134,135 +133,134 @@ export default function Customers() {
       <s-stack direction="block" gap="base">
         {!configuredPointsPerDollar ? (
           <s-banner tone="critical">
-            You need to configure how many points your customers will earn per
+            You need to configure how many points customers will earn per
             dollar spent. <s-link href="/app/settings">Go to settings.</s-link>
           </s-banner>
         ) : null}
         {!hasDiscountRule ? (
           <s-banner tone="caution">
-            You need to add at least one discount rule for your customers to
-            spend their points. This does not affect earning points.{" "}
+            You need at least one discount rule for customers to
+            spend their points.{" "}
             <s-link href="/app/settings">Go to settings.</s-link>
           </s-banner>
         ) : null}
-      {totalAllCustomers === 0 && !initialQuery ? (
-        <s-section padding="base">
-          <s-paragraph>No rewards customers found yet.</s-paragraph>
-        </s-section>
-      ) : (
-        <s-stack direction="block" gap="base">
-          <s-search-field
-            label="Search customers"
-            labelAccessibilityVisibility="exclusive"
-            placeholder="Search customers"
-            value={query}
-            onInput={(e) => setQuery(e.currentTarget.value)}
-          ></s-search-field>
-
-          <s-section padding="none">
-            <s-box>
-              <s-table>
-                <s-table-header-row>
-                  <s-table-header listSlot="primary">Name</s-table-header>
-                  <s-table-header>Email</s-table-header>
-                  <s-table-header>Current points</s-table-header>
-                  <s-table-header>Lifetime points</s-table-header>
-                </s-table-header-row>
-                <s-table-body>
-                  {customers.length === 0 ? (
-                    <s-table-row>
-                      <s-table-cell>No results found.</s-table-cell>
-                    </s-table-row>
-                  ) : (
-                    customers.map((customer) => (
-                      <s-table-row
-                        key={customer.id}
-                        clickDelegate={`customer-${customer.id}`}
-                      >
-                        <s-table-cell>
-                          <s-link
-                            id={`customer-${customer.id}`}
-                            href={`/app/customers/${customer.id}${
-                              searchSuffix ? `?${searchSuffix}` : ""
-                            }`}
-                            accessibilityLabel={`View ${customer.name || customer.email}`}
-                            onClick={() => {
-                              sessionStorage.setItem(
-                                "customersScroll",
-                                String(window.scrollY),
-                              );
-                            }}
-                          >
-                            {customer.name ?? "—"}
-                          </s-link>
-                        </s-table-cell>
-                        <s-table-cell>{customer.email}</s-table-cell>
-                        <s-table-cell>{customer.currentPoints}</s-table-cell>
-                        <s-table-cell>{customer.lifetimePoints}</s-table-cell>
-                      </s-table-row>
-                    ))
-                  )}
-                </s-table-body>
-              </s-table>
-
-              {totalCustomers > 50 && (
-                <div
-                  style={{
-                    borderTop: "0.5px solid rgb(227 227 227)",
-                    position: "sticky",
-                    bottom: 0,
-                    zIndex: 10,
-                  }}
-                >
-                  <s-box background="subdued" padding="small-200">
-                    <s-stack
-                      direction="inline"
-                      justifyContent="start"
-                      alignItems="center"
-                      gap="small-100"
-                    >
-                      <s-button-group
-                        gap="none"
-                        accessibilityLabel="Pagination controls"
-                      >
-                        <s-button
-                          slot="secondary-actions"
-                          variant="secondary"
-                          icon="chevron-left"
-                          accessibilityLabel="Previous page"
-                          disabled={!hasPreviousPage}
-                          onClick={() => {
-                            const params = new URLSearchParams(searchParams);
-                            params.set("page", String(Math.max(page - 1, 1)));
-                            setSearchParams(params);
-                          }}
-                        />
-
-                        <s-button
-                          slot="secondary-actions"
-                          variant="secondary"
-                          icon="chevron-right"
-                          accessibilityLabel="Next page"
-                          disabled={!hasNextPage}
-                          onClick={() => {
-                            const params = new URLSearchParams(searchParams);
-                            params.set("page", String(page + 1));
-                            setSearchParams(params);
-                          }}
-                        />
-                      </s-button-group>
-
-                      <s-text color="subdued">
-                        {totalCustomers === 0 ? "0" : `${startIndex}-${endIndex}`}
-                      </s-text>
-                    </s-stack>
-                  </s-box>
-                </div>
-              )}
-            </s-box>
+        {totalAllCustomers === 0 && !initialQuery ? (
+          <s-section padding="base">
+            <s-paragraph>No rewards customers found yet.</s-paragraph>
           </s-section>
-        </s-stack>
-      )}
+        ) : (
+          <s-stack direction="block" gap="base">
+            <s-search-field
+              label="Search customers"
+              labelAccessibilityVisibility="exclusive"
+              placeholder="Search customers"
+              value={query}
+              onInput={(e) => setQuery(e.currentTarget.value)}
+            ></s-search-field>
+
+            <s-section padding="none">
+              <s-box>
+                <s-table>
+                  <s-table-header-row>
+                    <s-table-header listSlot="primary">Name</s-table-header>
+                    <s-table-header>Email</s-table-header>
+                    <s-table-header>Current points</s-table-header>
+                    <s-table-header>Lifetime points</s-table-header>
+                  </s-table-header-row>
+                  <s-table-body>
+                    {customers.length === 0 ? (
+                      <s-table-row>
+                        <s-table-cell>No results found.</s-table-cell>
+                      </s-table-row>
+                    ) : (
+                      customers.map((customer) => (
+                        <s-table-row
+                          key={customer.id}
+                          clickDelegate={`customer-${customer.id}`}
+                        >
+                          <s-table-cell>
+                            <s-link
+                              id={`customer-${customer.id}`}
+                              href={`/app/customers/${customer.id}${searchSuffix ? `?${searchSuffix}` : ""
+                                }`}
+                              accessibilityLabel={`View ${customer.name || customer.email}`}
+                              onClick={() => {
+                                sessionStorage.setItem(
+                                  "customersScroll",
+                                  String(window.scrollY),
+                                );
+                              }}
+                            >
+                              {customer.name ?? "—"}
+                            </s-link>
+                          </s-table-cell>
+                          <s-table-cell>{customer.email}</s-table-cell>
+                          <s-table-cell>{customer.currentPoints}</s-table-cell>
+                          <s-table-cell>{customer.lifetimePoints}</s-table-cell>
+                        </s-table-row>
+                      ))
+                    )}
+                  </s-table-body>
+                </s-table>
+
+                {totalCustomers > 50 && (
+                  <div
+                    style={{
+                      borderTop: "0.5px solid rgb(227 227 227)",
+                      position: "sticky",
+                      bottom: 0,
+                      zIndex: 10,
+                    }}
+                  >
+                    <s-box background="subdued" padding="small-200">
+                      <s-stack
+                        direction="inline"
+                        justifyContent="start"
+                        alignItems="center"
+                        gap="small-100"
+                      >
+                        <s-button-group
+                          gap="none"
+                          accessibilityLabel="Pagination controls"
+                        >
+                          <s-button
+                            slot="secondary-actions"
+                            variant="secondary"
+                            icon="chevron-left"
+                            accessibilityLabel="Previous page"
+                            disabled={!hasPreviousPage}
+                            onClick={() => {
+                              const params = new URLSearchParams(searchParams);
+                              params.set("page", String(Math.max(page - 1, 1)));
+                              setSearchParams(params);
+                            }}
+                          />
+
+                          <s-button
+                            slot="secondary-actions"
+                            variant="secondary"
+                            icon="chevron-right"
+                            accessibilityLabel="Next page"
+                            disabled={!hasNextPage}
+                            onClick={() => {
+                              const params = new URLSearchParams(searchParams);
+                              params.set("page", String(page + 1));
+                              setSearchParams(params);
+                            }}
+                          />
+                        </s-button-group>
+
+                        <s-text color="subdued">
+                          {totalCustomers === 0 ? "0" : `${startIndex}-${endIndex}`}
+                        </s-text>
+                      </s-stack>
+                    </s-box>
+                  </div>
+                )}
+              </s-box>
+            </s-section>
+          </s-stack>
+        )}
       </s-stack>
     </s-page>
   );

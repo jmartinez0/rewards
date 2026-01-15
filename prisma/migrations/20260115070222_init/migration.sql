@@ -1,9 +1,6 @@
 -- CreateEnum
 CREATE TYPE "LedgerType" AS ENUM ('EARN', 'SPEND', 'ADJUST', 'EXPIRE');
 
--- CreateEnum
-CREATE TYPE "CreationMethod" AS ENUM ('AUTO', 'MANUAL');
-
 -- CreateTable
 CREATE TABLE "Session" (
     "id" TEXT NOT NULL,
@@ -28,18 +25,20 @@ CREATE TABLE "Session" (
 );
 
 -- CreateTable
-CREATE TABLE "RewardsConfig" (
-    "id" INTEGER NOT NULL DEFAULT 1,
-    "pointsPerDollar" INTEGER NOT NULL DEFAULT 20,
+CREATE TABLE "Config" (
+    "id" SERIAL NOT NULL,
+    "pointsPerDollar" INTEGER NOT NULL DEFAULT 0,
     "pointsExpirationDays" INTEGER,
-    "isEnabled" BOOLEAN NOT NULL DEFAULT true,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
     "updatedAt" TIMESTAMP(3) NOT NULL,
+    "configuredPointsPerDollar" BOOLEAN NOT NULL DEFAULT false,
+    "configuredDiscountRule" BOOLEAN NOT NULL DEFAULT false,
 
-    CONSTRAINT "RewardsConfig_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Config_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
-CREATE TABLE "RewardsCustomer" (
+CREATE TABLE "Customer" (
     "id" SERIAL NOT NULL,
     "email" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -49,13 +48,13 @@ CREATE TABLE "RewardsCustomer" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "RewardsCustomer_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Customer_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
-CREATE TABLE "RewardsLedgerEntry" (
+CREATE TABLE "LedgerEntry" (
     "id" SERIAL NOT NULL,
-    "rewardsCustomerId" INTEGER NOT NULL,
+    "customerId" INTEGER NOT NULL,
     "type" "LedgerType" NOT NULL,
     "pointsDelta" INTEGER NOT NULL,
     "remainingPoints" INTEGER,
@@ -64,19 +63,33 @@ CREATE TABLE "RewardsLedgerEntry" (
     "sourceLotId" INTEGER,
     "notes" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "creationMethod" "CreationMethod" NOT NULL DEFAULT 'AUTO',
 
-    CONSTRAINT "RewardsLedgerEntry_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "LedgerEntry_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "DiscountRule" (
+    "id" SERIAL NOT NULL,
+    "points" INTEGER NOT NULL,
+    "percentOff" INTEGER NOT NULL,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "DiscountRule_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "RewardsCustomer_email_key" ON "RewardsCustomer"("email");
+CREATE UNIQUE INDEX "Customer_email_key" ON "Customer"("email");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "RewardsCustomer_shopifyCustomerId_key" ON "RewardsCustomer"("shopifyCustomerId");
+CREATE UNIQUE INDEX "Customer_shopifyCustomerId_key" ON "Customer"("shopifyCustomerId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "DiscountRule_points_key" ON "DiscountRule"("points");
 
 -- AddForeignKey
-ALTER TABLE "RewardsLedgerEntry" ADD CONSTRAINT "RewardsLedgerEntry_rewardsCustomerId_fkey" FOREIGN KEY ("rewardsCustomerId") REFERENCES "RewardsCustomer"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "LedgerEntry" ADD CONSTRAINT "LedgerEntry_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "RewardsLedgerEntry" ADD CONSTRAINT "RewardsLedgerEntry_sourceLotId_fkey" FOREIGN KEY ("sourceLotId") REFERENCES "RewardsLedgerEntry"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "LedgerEntry" ADD CONSTRAINT "LedgerEntry_sourceLotId_fkey" FOREIGN KEY ("sourceLotId") REFERENCES "LedgerEntry"("id") ON DELETE SET NULL ON UPDATE CASCADE;

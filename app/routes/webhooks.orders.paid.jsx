@@ -115,8 +115,8 @@ export const action = async ({ request }) => {
     return new Response();
   }
 
-  const config = await db.config.findUnique({ where: { shop } });
-  if (!config?.isEnabled) {
+  const config = await db.config.findFirst({ orderBy: { id: "asc" } });
+  if (!config?.isActive || !config?.configuredPointsPerDollar) {
     logWebhook("skipping (rewards disabled)", { requestId });
     return new Response();
   }
@@ -149,13 +149,12 @@ export const action = async ({ request }) => {
     : null;
 
   const shopifyCustomerId = getCustomerId(order);
-  const name = getOrderName(order);
+  const name = getOrderName(order) ?? email;
 
   try {
     await db.$transaction(async (tx) => {
       const existingEarn = await tx.ledgerEntry.findFirst({
         where: {
-          shop,
           type: "EARN",
           orderId,
         },
@@ -169,9 +168,7 @@ export const action = async ({ request }) => {
         return;
       }
 
-      let customer = await tx.customer.findFirst({
-        where: { shop, email },
-      });
+      let customer = await tx.customer.findFirst({ where: { email } });
 
       if (!customer) {
         logWebhook("creating customer", {
@@ -182,7 +179,6 @@ export const action = async ({ request }) => {
         });
         customer = await tx.customer.create({
           data: {
-            shop,
             email,
             shopifyCustomerId,
             name,
@@ -223,7 +219,6 @@ export const action = async ({ request }) => {
 
       await tx.ledgerEntry.create({
         data: {
-          shop,
           customerId: customer.id,
           type: "EARN",
           pointsDelta: points,

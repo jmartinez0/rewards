@@ -29,36 +29,28 @@ model Session {
 
 model Config {
   id                        Int      @id @default(autoincrement())
-  shop                      String   @unique
-  pointsPerDollar           Int      @default(20)
+  pointsPerDollar           Int      @default(0)
   pointsExpirationDays      Int?
-  isEnabled                 Boolean  @default(true)
+  isActive                  Boolean  @default(true)
   updatedAt                 DateTime @updatedAt
   configuredPointsPerDollar Boolean  @default(false)
   configuredDiscountRule    Boolean  @default(false)
-  addedPointsEarnedBanner   Boolean  @default(false)
-  addedPointSpendBlock      Boolean  @default(false)
 }
 
 model Customer {
   id                Int           @id @default(autoincrement())
-  shop              String
-  email             String
+  email             String        @unique
   name              String
-  shopifyCustomerId String?
+  shopifyCustomerId String?       @unique
   currentPoints     Int           @default(0)
   lifetimePoints    Int           @default(0)
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
   ledgerEntries     LedgerEntry[]
-
-  @@unique([shop, email])
-  @@unique([shop, shopifyCustomerId])
 }
 
 model LedgerEntry {
   id              Int           @id @default(autoincrement())
-  shop            String
   customerId      Int
   type            LedgerType
   pointsDelta     Int
@@ -71,20 +63,15 @@ model LedgerEntry {
   customer        Customer      @relation(fields: [customerId], references: [id])
   sourceLot       LedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
   depletions      LedgerEntry[] @relation("RelatedEarn")
-
-  @@index([shop])
 }
 
 model DiscountRule {
   id         Int      @id @default(autoincrement())
-  shop       String
-  minPoints  Int
+  points     Int      @unique
   percentOff Int
-  isEnabled  Boolean  @default(true)
+  isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
-
-  @@unique([shop, minPoints])
 }
 
 enum LedgerType {

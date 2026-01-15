@@ -51,7 +51,7 @@ function PointsEarnedBanner() {
     }
 
     if (isPreviewContext) {
-      console.log("Skipping points fetch in preview/CDN dev context",
+      console.log("Skipping points fetch in preview dev context",
         {
           scriptUrl: extension && extension.scriptUrl,
           orderId,
@@ -61,7 +61,7 @@ function PointsEarnedBanner() {
     }
 
     if (loadedOrders.has(orderId)) {
-      console.log("[JM Rewards] Points already loaded for order in this sandbox", { orderId });
+      console.log("Points already loaded for order in this sandbox", { orderId });
       return;
     }
     loadedOrders.add(orderId);

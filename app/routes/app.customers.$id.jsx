@@ -8,18 +8,16 @@ import db from "../db.server";
 
 export const loader = async ({ request, params }) => {
   const { session } = await authenticate.admin(request);
-  const shop = session.shop;
 
   const id = Number.parseInt(params.id, 10);
   if (Number.isNaN(id)) {
     throw new Response("Invalid customer id", { status: 400 });
   }
 
-  const customer = await db.customer.findFirst({
-    where: { id, shop },
+  const customer = await db.customer.findUnique({
+    where: { id },
     include: {
       ledgerEntries: {
-        where: { shop },
         orderBy: { createdAt: "desc" },
         include: {
           sourceLot: true,
@@ -41,8 +39,7 @@ export const loader = async ({ request, params }) => {
 };
 
 export const action = async ({ request, params }) => {
-  const { session } = await authenticate.admin(request);
-  const shop = session.shop;
+  await authenticate.admin(request);
 
   const id = Number.parseInt(params.id, 10);
   if (Number.isNaN(id)) {
@@ -70,7 +67,7 @@ export const action = async ({ request, params }) => {
     errors.reason = "Reason is required";
   }
 
-  const customer = await db.customer.findFirst({ where: { id, shop } });
+  const customer = await db.customer.findUnique({ where: { id } });
   if (!customer) {
     throw new Response("Customer not found", { status: 404 });
   }
@@ -91,7 +88,7 @@ export const action = async ({ request, params }) => {
     return { ok: false, errors };
   }
 
-  const config = await db.config.findUnique({ where: { shop } });
+  const config = await db.config.findFirst({ orderBy: { id: "asc" } });
   const now = new Date();
   const expiresAt =
     adjustmentType === "increase" && config?.pointsExpirationDays
@@ -105,7 +102,6 @@ export const action = async ({ request, params }) => {
   await db.$transaction(async (tx) => {
     await tx.ledgerEntry.create({
       data: {
-        shop,
         customerId: customer.id,
         type: "ADJUST",
         pointsDelta,
@@ -210,7 +206,7 @@ export default function CustomerDetails() {
             icon="arrow-left"
             href={backHref}
           />
-          <s-heading>{customer.name}</s-heading>
+          <s-heading>{customer.name ?? customer.email}</s-heading>
         </s-stack>
 
         <s-grid gridTemplateColumns="repeat(auto-fit, minmax(300px, 1fr))" gap="base">
