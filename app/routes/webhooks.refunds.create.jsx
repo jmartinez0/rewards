@@ -143,6 +143,44 @@ const getRefundTotalCentsFromPayload = (refund) => {
     if (cents > 0) return cents;
   }
 
+  // Shipping-only refunds: fall back to shipping lines / adjustments when there are
+  // no refund transactions and no refund line items.
+  const refundShippingLines = Array.isArray(refund.refund_shipping_lines)
+    ? refund.refund_shipping_lines
+    : Array.isArray(refund.refundShippingLines)
+      ? refund.refundShippingLines
+      : [];
+
+  const shippingCents = refundShippingLines.reduce((sum, line) => {
+    const amount =
+      line?.subtotal_set?.shop_money?.amount ??
+      line?.discounted_price_set?.shop_money?.amount ??
+      line?.price_set?.shop_money?.amount ??
+      line?.subtotal ??
+      line?.discounted_price ??
+      line?.price ??
+      "0";
+    return sum + parseMoneyToCents(amount);
+  }, 0);
+
+  const orderAdjustments = Array.isArray(refund.order_adjustments)
+    ? refund.order_adjustments
+    : Array.isArray(refund.orderAdjustments)
+      ? refund.orderAdjustments
+      : [];
+
+  const adjustmentCents = orderAdjustments.reduce((sum, adjustment) => {
+    const amount =
+      adjustment?.amount_set?.shop_money?.amount ??
+      adjustment?.amount ??
+      adjustment?.amount_set?.presentment_money?.amount ??
+      "0";
+    return sum + parseMoneyToCents(amount);
+  }, 0);
+
+  const fallbackCents = shippingCents + adjustmentCents;
+  if (fallbackCents > 0) return fallbackCents;
+
   return null;
 };
 
@@ -297,11 +335,25 @@ export const action = async ({ request }) => {
       let customer = null;
 
       if (shopifyCustomerId) {
-        customer = await tx.customer.findFirst({ where: { shopifyCustomerId } });
+        customer = await tx.customer.findFirst({
+          where: { shopifyCustomerId },
+          select: {
+            id: true,
+            currentPoints: true,
+            shopifyCustomerId: true,
+          },
+        });
       }
 
       if (!customer && email) {
-        customer = await tx.customer.findUnique({ where: { email } });
+        customer = await tx.customer.findUnique({
+          where: { email },
+          select: {
+            id: true,
+            currentPoints: true,
+            shopifyCustomerId: true,
+          },
+        });
       }
 
       if (!customer) {
@@ -317,16 +369,31 @@ export const action = async ({ request }) => {
             name: name ?? "Guest",
             shopifyCustomerId,
           },
+          select: {
+            id: true,
+            currentPoints: true,
+            shopifyCustomerId: true,
+          },
         });
       } else if (!customer.shopifyCustomerId && shopifyCustomerId) {
         customer = await tx.customer.update({
           where: { id: customer.id },
           data: { shopifyCustomerId },
+          select: {
+            id: true,
+            currentPoints: true,
+            shopifyCustomerId: true,
+          },
         });
       } else if (shopifyCustomerId && customer.shopifyCustomerId !== shopifyCustomerId) {
         customer = await tx.customer.update({
           where: { id: customer.id },
           data: { shopifyCustomerId },
+          select: {
+            id: true,
+            currentPoints: true,
+            shopifyCustomerId: true,
+          },
         });
       }
 
@@ -343,20 +410,33 @@ export const action = async ({ request }) => {
         },
       });
 
+      const earnLotRemaining =
+        earnLot && typeof earnLot.remainingPoints === "number"
+          ? Math.max(0, earnLot.remainingPoints)
+          : 0;
+
       const effectivePointsPerDollar =
         earnLot?.pointsPerDollar && earnLot.pointsPerDollar > 0
           ? earnLot.pointsPerDollar
           : config.pointsPerDollar;
 
       const pointsToRemove = Math.floor((refundTotalCents * effectivePointsPerDollar) / 100);
-      if (pointsToRemove <= 0) {
-        logWebhook("skipping (pointsToRemove <= 0)", {
+      // Refunds only deplete from the earn lot for this order.
+      const removablePoints = Math.min(pointsToRemove, earnLotRemaining);
+
+      if (pointsToRemove <= 0 || removablePoints <= 0) {
+        logWebhook("skipping (no refundable points remaining in earn lot)", {
           requestId,
           refundTotalCents,
           effectivePointsPerDollar,
           pointsToRemove,
+          earnLotRemaining,
+          removablePoints,
         });
-        return null;
+        return {
+          currentPoints: customer.currentPoints,
+          shopifyCustomerId: customer.shopifyCustomerId,
+        };
       }
 
       logWebhook("Creating refund adjust ledger entry", {
@@ -364,23 +444,20 @@ export const action = async ({ request }) => {
         customerId: customer.id,
         orderId,
         refundId,
-        pointsDelta: -pointsToRemove,
+        pointsDelta: -removablePoints,
         pointsPerDollar: effectivePointsPerDollar,
       });
 
-      if (earnLot && typeof earnLot.remainingPoints === "number") {
-        const nextRemaining = Math.max(0, earnLot.remainingPoints - pointsToRemove);
-        await tx.ledgerEntry.update({
-          where: { id: earnLot.id },
-          data: { remainingPoints: nextRemaining },
-        });
-      }
+      await tx.ledgerEntry.update({
+        where: { id: earnLot.id },
+        data: { remainingPoints: Math.max(0, earnLotRemaining - removablePoints) },
+      });
 
       await tx.ledgerEntry.create({
         data: {
           customerId: customer.id,
           type: "ADJUST",
-          pointsDelta: -pointsToRemove,
+          pointsDelta: -removablePoints,
           pointsPerDollar: effectivePointsPerDollar,
           notes: `Refund from order ${orderId}`,
           orderId,
@@ -391,7 +468,8 @@ export const action = async ({ request }) => {
       const updatedCustomer = await tx.customer.update({
         where: { id: customer.id },
         data: {
-          currentPoints: { decrement: pointsToRemove },
+          // Clamp to avoid negative balance if DB drift exists.
+          currentPoints: { decrement: Math.min(removablePoints, customer.currentPoints) },
         },
         select: {
           currentPoints: true,

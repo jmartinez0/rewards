@@ -51,8 +51,8 @@ export const action = async ({ request }) => {
     return {
       discountRules: rules.map((rule) => ({
         points: rule.points,
-        percentOff: rule.percentOff,
-        isActive: Boolean(rule.isActive),
+        percent_off: rule.percentOff,
+        is_active: Boolean(rule.isActive),
       })),
     };
   };

@@ -62,6 +62,7 @@ CREATE TABLE "LedgerEntry" (
     "expiresAt" TIMESTAMP(3),
     "orderId" TEXT,
     "sourceLotId" INTEGER,
+    "adjustmentGroupId" UUID,
     "notes" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

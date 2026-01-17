@@ -172,6 +172,8 @@ export const action = async ({ request, params }) => {
         },
       });
     } else {
+      const adjustmentGroupId = crypto?.randomUUID?.() ?? String(Date.now());
+
       const lots = await tx.ledgerEntry.findMany({
         where: {
           customerId: customer.id,
@@ -198,6 +200,15 @@ export const action = async ({ request, params }) => {
         },
       });
 
+      const totalAvailable = lots.reduce((sum, lot) => {
+        const lotRemaining = typeof lot.remainingPoints === "number" ? lot.remainingPoints : 0;
+        return sum + Math.max(0, lotRemaining);
+      }, 0);
+
+      if (totalAvailable <= 0 || Math.abs(pointsDelta) > totalAvailable) {
+        throw new Response("Not enough available points to decrease.", { status: 400 });
+      }
+
       let remainingToRemove = Math.abs(pointsDelta);
 
       for (const lot of lots) {
@@ -223,20 +234,7 @@ export const action = async ({ request, params }) => {
             notes: reason,
             createdAt: now,
             sourceLotId: lot.id,
-          },
-        });
-      }
-
-      if (remainingToRemove > 0) {
-        await tx.ledgerEntry.create({
-          data: {
-            customerId: customer.id,
-            type: "ADJUST",
-            pointsDelta: -remainingToRemove,
-            remainingPoints: null,
-            expiresAt: null,
-            notes: reason,
-            createdAt: now,
+            adjustmentGroupId,
           },
         });
       }
@@ -397,6 +395,8 @@ export default function CustomerDetails() {
                     const modalId =
                       row.kind === "spend_group"
                         ? modalIdForSpendGroup(row.orderId)
+                        : row.kind === "adjust_group"
+                          ? modalIdForAdjustGroup(row.adjustmentGroupId)
                         : modalIdForEntry(entry.id);
 
                     return (
@@ -429,6 +429,8 @@ export default function CustomerDetails() {
         const modalId =
           row.kind === "spend_group"
             ? modalIdForSpendGroup(row.orderId)
+            : row.kind === "adjust_group"
+              ? modalIdForAdjustGroup(row.adjustmentGroupId)
             : modalIdForEntry(entry.id);
         const pointsLabel = getPointsLabel(entry.type, entry.pointsDelta);
         const numericOrderId = getTrailingNumericId(entry.orderId);
@@ -438,6 +440,10 @@ export default function CustomerDetails() {
             : undefined;
         const pointsSpentFromLots =
           entry.type === "SPEND" ? getPointsSpentFromLots(row) : null;
+        const pointsRemovedFromLots =
+          entry.type === "ADJUST" && entry.pointsDelta < 0
+            ? getPointsRemovedFromLots(row)
+            : null;
         const pointsDepletedBy =
           row.kind === "single" ? getPointsDepletedBy(entry) : null;
 
@@ -468,12 +474,31 @@ export default function CustomerDetails() {
                   )}
                 </s-text>
               ) : null}
-	              {pointsLabel ? (
-	                <s-text>{pointsLabel}: {Math.abs(entry.pointsDelta)}</s-text>
+		              {pointsLabel ? (
+		                <s-text>{pointsLabel}: {formatNumber(Math.abs(entry.pointsDelta))}</s-text>
+		              ) : null}
+	              {pointsRemovedFromLots && pointsRemovedFromLots.length ? (
+	                <s-unordered-list>
+	                  {pointsRemovedFromLots.map((lot) => (
+	                    <s-list-item key={lot.key}>
+	                      <s-stack
+	                        direction="inline"
+	                        alignItems="center"
+	                        gap="small-400"
+	                      >
+	                        <s-text>{lot.label}</s-text>
+	                        <s-icon type="info" interestFor={lot.tooltipId} />
+	                      </s-stack>
+	                      <s-tooltip id={lot.tooltipId}>
+	                        {renderLotTooltipContent(lot.sourceLot)}
+	                      </s-tooltip>
+	                    </s-list-item>
+	                  ))}
+	                </s-unordered-list>
 	              ) : null}
-	              {pointsSpentFromLots ? (
-	                <s-stack direction="block" gap="small-200">
-	                  <s-text>Points spent from:</s-text>
+		              {pointsSpentFromLots ? (
+		                <s-stack direction="block" gap="small-200">
+		                  <s-text>Points spent from:</s-text>
 	                  {pointsSpentFromLots.length ? (
                     <s-unordered-list>
                       {pointsSpentFromLots.map((lot) => (
@@ -512,13 +537,17 @@ export default function CustomerDetails() {
                   Expires: {formatDateMMDDYYYY(entry.expiresAt)}
                 </s-text>
               ) : null}
-	              {entry.type === "ADJUST" ? (
-	                (() => {
-	                  const reason = entry.notes?.trim();
-                  const numericReasonOrderId =
-                    reason?.startsWith("Refund from order ")
-                      ? getTrailingNumericId(reason)
-                      : null;
+		              {entry.type === "ADJUST" ? (
+			                (() => {
+			                  const rawNotes =
+			                    row.kind === "adjust_group"
+			                      ? row.entries?.[0]?.notes
+			                      : entry.notes;
+			                  const reason = rawNotes?.trim();
+	                  const numericReasonOrderId =
+	                    reason?.startsWith("Refund from order ")
+	                      ? getTrailingNumericId(reason)
+	                      : null;
                   const reasonOrderAdminHref =
                     numericReasonOrderId && storeSlug
                       ? `https://admin.shopify.com/store/${storeSlug}/orders/${numericReasonOrderId}`
@@ -544,8 +573,8 @@ export default function CustomerDetails() {
                   }
 
 		                  return <s-text>Reason: {reason || "—"}</s-text>;
-		                })()
-		              ) : null}
+			                })()
+			              ) : null}
 	              {pointsDepletedBy && pointsDepletedBy.length ? (
 	                <s-stack direction="block" gap="small-200">
 	                  <s-text>Points depleted by:</s-text>
@@ -567,52 +596,21 @@ export default function CustomerDetails() {
 	                        </s-stack>
 	                        <s-tooltip id={depletion.tooltipId}>
 	                          <s-paragraph>{formatTimestampLong(depletion.createdAt)}</s-paragraph>
-	                          <s-paragraph>
-	                            Order ID:{" "}
-	                            {getTrailingNumericId(depletion.orderId) ?? "—"}
-	                          </s-paragraph>
+	                          {depletion.orderId ? (
+	                            <s-paragraph>
+	                              Order ID:{" "}
+	                              {getTrailingNumericId(depletion.orderId) ?? "—"}
+	                            </s-paragraph>
+	                          ) : (
+	                            <s-paragraph>
+	                              Reason: {depletion.notes?.trim() || "—"}
+	                            </s-paragraph>
+	                          )}
 	                        </s-tooltip>
 	                      </s-list-item>
 	                    ))}
 	                  </s-unordered-list>
 	                </s-stack>
-	              ) : null}
-	              {entry.type === "ADJUST" &&
-	              entry.pointsDelta < 0 &&
-	              entry.sourceLot ? (
-	                (() => {
-	                  const tooltipId = `tooltip-adjust-${entry.id}-source`;
-	                  const source = entry.sourceLot;
-	                  const sourceCreatedAt = formatDateMMDDYYYY(source.createdAt);
-	                  const sourceLabel =
-	                    source.type === "EARN"
-	                      ? `Earned ${sourceCreatedAt}`
-	                      : source.type === "ADJUST" && source.pointsDelta > 0
-	                        ? `Added ${sourceCreatedAt}`
-	                        : `Source ${sourceCreatedAt}`;
-	                  const label = `${formatNumber(Math.abs(entry.pointsDelta))} points - ${sourceLabel}`;
-
-	                  return (
-	                    <s-stack direction="block" gap="small-200">
-	                      <s-text>Removed points from:</s-text>
-	                      <s-unordered-list>
-	                        <s-list-item>
-	                          <s-stack
-	                            direction="inline"
-	                            alignItems="center"
-	                            gap="small-400"
-	                          >
-	                            <s-text>{label}</s-text>
-	                            <s-icon type="info" interestFor={tooltipId} />
-	                          </s-stack>
-	                          <s-tooltip id={tooltipId}>
-	                            {renderLotTooltipContent(source)}
-	                          </s-tooltip>
-	                        </s-list-item>
-	                      </s-unordered-list>
-	                    </s-stack>
-	                  );
-	                })()
 	              ) : null}
 	            </s-stack>
 	          </s-modal>
@@ -839,14 +837,30 @@ function modalIdForSpendGroup(orderId) {
   return `modal-spend-${toSafeId(orderId)}`;
 }
 
+function modalIdForAdjustGroup(adjustmentGroupId) {
+  return `modal-adjust-${toSafeId(adjustmentGroupId)}`;
+}
+
 function buildHistoryRows(entries) {
   const spendGroups = new Map();
+  const adjustGroups = new Map();
 
   entries.forEach((entry, index) => {
     if (entry.type !== "SPEND" || !entry.orderId) return;
     const existing = spendGroups.get(entry.orderId);
     if (!existing) {
       spendGroups.set(entry.orderId, { firstIndex: index, entries: [entry] });
+      return;
+    }
+    existing.entries.push(entry);
+  });
+
+  entries.forEach((entry, index) => {
+    if (entry.type !== "ADJUST" || entry.pointsDelta >= 0) return;
+    if (!entry.adjustmentGroupId) return;
+    const existing = adjustGroups.get(entry.adjustmentGroupId);
+    if (!existing) {
+      adjustGroups.set(entry.adjustmentGroupId, { firstIndex: index, entries: [entry] });
       return;
     }
     existing.entries.push(entry);
@@ -871,6 +885,27 @@ function buildHistoryRows(entries) {
         pointsDelta,
         createdAt: entry.createdAt,
         orderId: entry.orderId,
+        entries: group.entries,
+      });
+      return;
+    }
+
+    if (entry.type === "ADJUST" && entry.pointsDelta < 0 && entry.adjustmentGroupId) {
+      const group = adjustGroups.get(entry.adjustmentGroupId);
+      if (!group || group.firstIndex !== index) return;
+
+      const pointsDelta = group.entries.reduce(
+        (sum, adjustEntry) => sum + adjustEntry.pointsDelta,
+        0
+      );
+
+      rows.push({
+        kind: "adjust_group",
+        id: `adjust:${entry.adjustmentGroupId}`,
+        type: "ADJUST",
+        pointsDelta,
+        createdAt: entry.createdAt,
+        adjustmentGroupId: entry.adjustmentGroupId,
         entries: group.entries,
       });
       return;
@@ -944,6 +979,69 @@ function getPointsSpentFromLots(row) {
     });
 }
 
+function getPointsRemovedFromLots(row) {
+  const adjustmentEntries =
+    row && row.kind === "adjust_group" && Array.isArray(row.entries)
+      ? row.entries
+      : row && row.kind === "single"
+        ? [row.entry]
+        : [];
+
+  const rowKey =
+    row && row.kind === "adjust_group"
+      ? `adjust-${toSafeId(row.adjustmentGroupId)}`
+      : row && row.kind === "single"
+        ? `entry-${row.entry?.id ?? "unknown"}`
+        : "unknown";
+
+  const byLotId = new Map();
+
+  adjustmentEntries.forEach((adjustEntry) => {
+    if (adjustEntry?.type !== "ADJUST" || !(adjustEntry?.pointsDelta < 0)) return;
+    const lotId = adjustEntry?.sourceLotId;
+    if (!lotId) return;
+
+    const existing = byLotId.get(lotId) ?? {
+      lotId,
+      sourceLot: adjustEntry?.sourceLot,
+      removed: 0,
+    };
+
+    existing.removed += Math.abs(adjustEntry?.pointsDelta ?? 0);
+    if (!existing.sourceLot && adjustEntry?.sourceLot) existing.sourceLot = adjustEntry.sourceLot;
+
+    byLotId.set(lotId, existing);
+  });
+
+  return Array.from(byLotId.values())
+    .sort((a, b) => a.lotId - b.lotId)
+    .map((item) => {
+      const sourceType = item.sourceLot?.type;
+      const sourceCreatedAt = item.sourceLot?.createdAt
+        ? formatDateMMDDYYYY(item.sourceLot.createdAt)
+        : null;
+
+      const sourceLabel =
+        sourceType === "EARN"
+          ? `Earned ${sourceCreatedAt}`
+          : sourceType === "ADJUST"
+            ? `Added ${sourceCreatedAt}`
+            : `Source ${sourceCreatedAt}`;
+
+      const parts = [
+        `${formatNumber(item.removed)} points`,
+        sourceLabel,
+      ];
+
+      return {
+        key: String(item.lotId),
+        tooltipId: `tooltip-${rowKey}-lot-${item.lotId}`,
+        label: parts.join(" - "),
+        sourceLot: item.sourceLot ?? null,
+      };
+    });
+}
+
 function getPointsDepletedBy(entry) {
   const isSourceLot =
     entry?.type === "EARN" || (entry?.type === "ADJUST" && entry?.pointsDelta > 0);
@@ -955,22 +1053,18 @@ function getPointsDepletedBy(entry) {
   return depletions
     .filter((d) => {
       if (d?.type === "SPEND" || d?.type === "EXPIRE") return true;
-      if (d?.type !== "ADJUST") return false;
-      if (!(d?.pointsDelta < 0)) return false;
-      const notes = String(d?.notes ?? "").trim();
-      return notes.startsWith("Refund from order ");
+      return d?.type === "ADJUST" && d?.pointsDelta < 0;
     })
     .map((d) => {
-      const isRefund =
-        d?.type === "ADJUST" &&
-        d?.pointsDelta < 0 &&
-        String(d?.notes ?? "").trim().startsWith("Refund from order ");
+      const notes = String(d?.notes ?? "").trim();
+      const isRefund = notes.startsWith("Refund from order ");
 
       return {
         key: String(d.id),
         tooltipId: `tooltip-${entryKey}-depletion-${d.id}`,
         createdAt: d.createdAt,
         orderId: d.orderId,
+        notes,
         label: `${isRefund ? "Refund" : formatLedgerType(d.type)} ${Math.abs(d.pointsDelta)} points`,
       };
     });
@@ -986,7 +1080,7 @@ function renderLotTooltipContent(sourceLot) {
       <>
         <s-paragraph>{formatTimestampLong(sourceLot.createdAt)}</s-paragraph>
         <s-paragraph>Order ID: {numericOrderId ?? "—"}</s-paragraph>
-        <s-paragraph>Points earned: {sourceLot.pointsDelta}</s-paragraph>
+        <s-paragraph>Points earned: {formatNumber(sourceLot.pointsDelta)}</s-paragraph>
         <s-paragraph>Points remaining: {formatNumber(sourceLot.remainingPoints)}</s-paragraph>
         <s-paragraph>Expires: {formatDateMMDDYYYY(sourceLot.expiresAt)}</s-paragraph>
       </>
