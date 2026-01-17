@@ -23,9 +23,18 @@ api_version = "2026-01"
   topics = [ "orders/paid" ]
   uri = "/webhooks/orders/paid"
 
+  [[webhooks.subscriptions]]
+  topics = [ "refunds/create" ]
+  uri = "/webhooks/refunds/create"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_customers, write_customers, read_orders"
+scopes = "read_customers, write_customers, read_orders, write_app_proxy"
 
 [auth]
 redirect_urls = [ "https://jm-rewards.vercel.app/auth/callback" ]
+
+[app_proxy]
+prefix = "apps"
+subpath = "rewards"
+url = "https://jm-rewards.vercel.app/apps/rewards"

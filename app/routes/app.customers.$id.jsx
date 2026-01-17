@@ -159,17 +159,88 @@ export const action = async ({ request, params }) => {
   const nextCurrentPoints = customer.currentPoints + pointsDelta;
 
   await db.$transaction(async (tx) => {
-    await tx.ledgerEntry.create({
-      data: {
-        customerId: customer.id,
-        type: "ADJUST",
-        pointsDelta,
-        remainingPoints: pointsDelta > 0 ? pointsDelta : null,
-        expiresAt,
-        notes: reason,
-        createdAt: now,
-      },
-    });
+    if (pointsDelta > 0) {
+      await tx.ledgerEntry.create({
+        data: {
+          customerId: customer.id,
+          type: "ADJUST",
+          pointsDelta,
+          remainingPoints: pointsDelta,
+          expiresAt,
+          notes: reason,
+          createdAt: now,
+        },
+      });
+    } else {
+      const lots = await tx.ledgerEntry.findMany({
+        where: {
+          customerId: customer.id,
+          remainingPoints: { gt: 0 },
+          AND: [
+            {
+              OR: [
+                { type: "EARN" },
+                { type: "ADJUST", pointsDelta: { gt: 0 } },
+              ],
+            },
+            {
+              OR: [
+                { expiresAt: null },
+                { expiresAt: { gt: now } },
+              ],
+            },
+          ],
+        },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          remainingPoints: true,
+        },
+      });
+
+      let remainingToRemove = Math.abs(pointsDelta);
+
+      for (const lot of lots) {
+        if (remainingToRemove <= 0) break;
+        const lotRemaining = typeof lot.remainingPoints === "number" ? lot.remainingPoints : 0;
+        if (lotRemaining <= 0) continue;
+
+        const take = Math.min(lotRemaining, remainingToRemove);
+        remainingToRemove -= take;
+
+        await tx.ledgerEntry.update({
+          where: { id: lot.id },
+          data: { remainingPoints: Math.max(0, lotRemaining - take) },
+        });
+
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: customer.id,
+            type: "ADJUST",
+            pointsDelta: -take,
+            remainingPoints: null,
+            expiresAt: null,
+            notes: reason,
+            createdAt: now,
+            sourceLotId: lot.id,
+          },
+        });
+      }
+
+      if (remainingToRemove > 0) {
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: customer.id,
+            type: "ADJUST",
+            pointsDelta: -remainingToRemove,
+            remainingPoints: null,
+            expiresAt: null,
+            notes: reason,
+            createdAt: now,
+          },
+        });
+      }
+    }
 
     await tx.customer.update({
       where: { id: customer.id },
@@ -397,13 +468,13 @@ export default function CustomerDetails() {
                   )}
                 </s-text>
               ) : null}
-              {pointsLabel ? (
-                <s-text>{pointsLabel}: {Math.abs(entry.pointsDelta)}</s-text>
-              ) : null}
-              {pointsSpentFromLots ? (
-                <s-stack direction="block" gap="small-200">
-                  <s-text>Points spent from:</s-text>
-                  {pointsSpentFromLots.length ? (
+	              {pointsLabel ? (
+	                <s-text>{pointsLabel}: {Math.abs(entry.pointsDelta)}</s-text>
+	              ) : null}
+	              {pointsSpentFromLots ? (
+	                <s-stack direction="block" gap="small-200">
+	                  <s-text>Points spent from:</s-text>
+	                  {pointsSpentFromLots.length ? (
                     <s-unordered-list>
                       {pointsSpentFromLots.map((lot) => (
                         <s-list-item key={lot.key}>
@@ -441,44 +512,112 @@ export default function CustomerDetails() {
                   Expires: {formatDateMMDDYYYY(entry.expiresAt)}
                 </s-text>
               ) : null}
-              {pointsDepletedBy && pointsDepletedBy.length ? (
-                <s-stack direction="block" gap="small-200">
-                  <s-text>Points depleted by:</s-text>
-                  <s-unordered-list>
-                    {pointsDepletedBy.map((depletion) => (
-                      <s-list-item key={depletion.key}>
-                        <s-stack
-                          direction="inline"
-                          alignItems="center"
-                          gap="small-400"
-                        >
-                          <s-text interestFor={depletion.tooltipId}>
-                            {depletion.label}
-                          </s-text>
-                          <s-icon
-                            type="info"
-                            interestFor={depletion.tooltipId}
-                          />
-                        </s-stack>
-                        <s-tooltip id={depletion.tooltipId}>
-                          <s-paragraph>{formatTimestampLong(depletion.createdAt)}</s-paragraph>
-                          <s-paragraph>
-                            Order ID:{" "}
-                            {getTrailingNumericId(depletion.orderId) ?? "—"}
-                          </s-paragraph>
-                        </s-tooltip>
-                      </s-list-item>
-                    ))}
-                  </s-unordered-list>
-                </s-stack>
-              ) : null}
-              {entry.type === "ADJUST" ? (
-                <s-text>Reason: {entry.notes?.trim() || "—"}</s-text>
-              ) : null}
-            </s-stack>
-          </s-modal>
-        );
-      })}
+	              {entry.type === "ADJUST" ? (
+	                (() => {
+	                  const reason = entry.notes?.trim();
+                  const numericReasonOrderId =
+                    reason?.startsWith("Refund from order ")
+                      ? getTrailingNumericId(reason)
+                      : null;
+                  const reasonOrderAdminHref =
+                    numericReasonOrderId && storeSlug
+                      ? `https://admin.shopify.com/store/${storeSlug}/orders/${numericReasonOrderId}`
+                      : undefined;
+
+                  if (reason?.startsWith("Refund from order ") && numericReasonOrderId) {
+                    return (
+                      <s-text>
+                        Reason: Refund from order{" "}
+                        {reasonOrderAdminHref ? (
+                          <s-link
+                            href={reasonOrderAdminHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            {numericReasonOrderId}
+                          </s-link>
+                        ) : (
+                          numericReasonOrderId
+                        )}
+                      </s-text>
+                    );
+                  }
+
+		                  return <s-text>Reason: {reason || "—"}</s-text>;
+		                })()
+		              ) : null}
+	              {pointsDepletedBy && pointsDepletedBy.length ? (
+	                <s-stack direction="block" gap="small-200">
+	                  <s-text>Points depleted by:</s-text>
+	                  <s-unordered-list>
+	                    {pointsDepletedBy.map((depletion) => (
+	                      <s-list-item key={depletion.key}>
+	                        <s-stack
+	                          direction="inline"
+	                          alignItems="center"
+	                          gap="small-400"
+	                        >
+	                          <s-text interestFor={depletion.tooltipId}>
+	                            {depletion.label}
+	                          </s-text>
+	                          <s-icon
+	                            type="info"
+	                            interestFor={depletion.tooltipId}
+	                          />
+	                        </s-stack>
+	                        <s-tooltip id={depletion.tooltipId}>
+	                          <s-paragraph>{formatTimestampLong(depletion.createdAt)}</s-paragraph>
+	                          <s-paragraph>
+	                            Order ID:{" "}
+	                            {getTrailingNumericId(depletion.orderId) ?? "—"}
+	                          </s-paragraph>
+	                        </s-tooltip>
+	                      </s-list-item>
+	                    ))}
+	                  </s-unordered-list>
+	                </s-stack>
+	              ) : null}
+	              {entry.type === "ADJUST" &&
+	              entry.pointsDelta < 0 &&
+	              entry.sourceLot ? (
+	                (() => {
+	                  const tooltipId = `tooltip-adjust-${entry.id}-source`;
+	                  const source = entry.sourceLot;
+	                  const sourceCreatedAt = formatDateMMDDYYYY(source.createdAt);
+	                  const sourceLabel =
+	                    source.type === "EARN"
+	                      ? `Earned ${sourceCreatedAt}`
+	                      : source.type === "ADJUST" && source.pointsDelta > 0
+	                        ? `Added ${sourceCreatedAt}`
+	                        : `Source ${sourceCreatedAt}`;
+	                  const label = `${formatNumber(Math.abs(entry.pointsDelta))} points - ${sourceLabel}`;
+
+	                  return (
+	                    <s-stack direction="block" gap="small-200">
+	                      <s-text>Removed points from:</s-text>
+	                      <s-unordered-list>
+	                        <s-list-item>
+	                          <s-stack
+	                            direction="inline"
+	                            alignItems="center"
+	                            gap="small-400"
+	                          >
+	                            <s-text>{label}</s-text>
+	                            <s-icon type="info" interestFor={tooltipId} />
+	                          </s-stack>
+	                          <s-tooltip id={tooltipId}>
+	                            {renderLotTooltipContent(source)}
+	                          </s-tooltip>
+	                        </s-list-item>
+	                      </s-unordered-list>
+	                    </s-stack>
+	                  );
+	                })()
+	              ) : null}
+	            </s-stack>
+	          </s-modal>
+	        );
+	      })}
       <s-modal
         id="adjustPoints"
         heading="Adjust points"
@@ -814,14 +953,27 @@ function getPointsDepletedBy(entry) {
   const entryKey = `lot-${entry.id}`;
 
   return depletions
-    .filter((d) => d?.type === "SPEND" || d?.type === "EXPIRE")
-    .map((d) => ({
-      key: String(d.id),
-      tooltipId: `tooltip-${entryKey}-depletion-${d.id}`,
-      createdAt: d.createdAt,
-      orderId: d.orderId,
-      label: `${formatLedgerType(d.type)} ${Math.abs(d.pointsDelta)} points`,
-    }));
+    .filter((d) => {
+      if (d?.type === "SPEND" || d?.type === "EXPIRE") return true;
+      if (d?.type !== "ADJUST") return false;
+      if (!(d?.pointsDelta < 0)) return false;
+      const notes = String(d?.notes ?? "").trim();
+      return notes.startsWith("Refund from order ");
+    })
+    .map((d) => {
+      const isRefund =
+        d?.type === "ADJUST" &&
+        d?.pointsDelta < 0 &&
+        String(d?.notes ?? "").trim().startsWith("Refund from order ");
+
+      return {
+        key: String(d.id),
+        tooltipId: `tooltip-${entryKey}-depletion-${d.id}`,
+        createdAt: d.createdAt,
+        orderId: d.orderId,
+        label: `${isRefund ? "Refund" : formatLedgerType(d.type)} ${Math.abs(d.pointsDelta)} points`,
+      };
+    });
 }
 
 function renderLotTooltipContent(sourceLot) {
@@ -844,9 +996,9 @@ function renderLotTooltipContent(sourceLot) {
   if (sourceLot.type === "ADJUST" && sourceLot.pointsDelta > 0) {
     return (
       <>
-        <s-text>Timestamp: {formatTimestampLong(sourceLot.createdAt)}</s-text>
-        <s-text>Points added: {sourceLot.pointsDelta}</s-text>
-        <s-text>Points remaining: {formatNumber(sourceLot.remainingPoints)}</s-text>
+        <s-paragraph>{formatTimestampLong(sourceLot.createdAt)}</s-paragraph>
+        <s-paragraph>Points added: {sourceLot.pointsDelta}</s-paragraph>
+        <s-paragraph>Points remaining: {formatNumber(sourceLot.remainingPoints)}</s-paragraph>
       </>
     );
   }

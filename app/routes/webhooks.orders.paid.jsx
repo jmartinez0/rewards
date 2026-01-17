@@ -158,6 +158,8 @@ export const action = async ({ request }) => {
   const order = payload;
   const email = getOrderEmail(order);
   const orderId = getOrderId(order);
+  const shopifyCustomerId = getCustomerId(order);
+  const name = getOrderName(order) ?? email;
 
   logWebhook("Parsed payload", {
     requestId,
@@ -207,9 +209,6 @@ export const action = async ({ request }) => {
     )
     : null;
 
-  const shopifyCustomerId = getCustomerId(order);
-  const name = getOrderName(order) ?? email;
-
   let updatedCustomerForMetafield = null;
 
   try {
@@ -226,7 +225,31 @@ export const action = async ({ request }) => {
           requestId,
           existingEarnId: existingEarn.id,
         });
-        return null;
+        // Still return current points so we can backfill the metafield cache.
+        const existingCustomer = await tx.customer.findFirst({
+          where: { email },
+          select: {
+            currentPoints: true,
+            shopifyCustomerId: true,
+          },
+        });
+
+        if (
+          existingCustomer?.shopifyCustomerId == null &&
+          shopifyCustomerId
+        ) {
+          const updated = await tx.customer.update({
+            where: { email },
+            data: { shopifyCustomerId },
+            select: {
+              currentPoints: true,
+              shopifyCustomerId: true,
+            },
+          });
+          return updated;
+        }
+
+        return existingCustomer;
       }
 
       let customer = await tx.customer.findFirst({ where: { email } });
@@ -258,6 +281,17 @@ export const action = async ({ request }) => {
             ...(name && name !== customer.name ? { name } : {}),
           },
         });
+      } else if (shopifyCustomerId && customer.shopifyCustomerId !== shopifyCustomerId) {
+        logWebhook("updating customer shopifyCustomerId (mismatch)", {
+          requestId,
+          customerId: customer.id,
+        });
+        customer = await tx.customer.update({
+          where: { id: customer.id },
+          data: {
+            shopifyCustomerId,
+          },
+        });
       } else if (name && name !== customer.name) {
         logWebhook("updating customer name", {
           requestId,
@@ -284,6 +318,7 @@ export const action = async ({ request }) => {
           type: "EARN",
           pointsDelta: points,
           remainingPoints: points,
+          pointsPerDollar: config.pointsPerDollar,
           expiresAt,
           orderId,
         },
@@ -322,6 +357,22 @@ export const action = async ({ request }) => {
       shopifyCustomerId: updatedCustomerForMetafield.shopifyCustomerId,
       currentPoints: updatedCustomerForMetafield.currentPoints,
     });
+  } else if (shopifyCustomerId) {
+    // Best-effort backfill even if we didn't create new points for this request.
+    const customer = await db.customer.findUnique({
+      where: { email },
+      select: {
+        currentPoints: true,
+        shopifyCustomerId: true,
+      },
+    });
+    if (customer) {
+      await setCustomerCurrentPointsMetafield({
+        shopDomain: shop,
+        shopifyCustomerId: customer.shopifyCustomerId ?? shopifyCustomerId,
+        currentPoints: customer.currentPoints,
+      });
+    }
   }
 
   return new Response();

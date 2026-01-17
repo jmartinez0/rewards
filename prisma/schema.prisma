@@ -55,6 +55,7 @@ model LedgerEntry {
   type            LedgerType
   pointsDelta     Int
   remainingPoints Int?
+  pointsPerDollar Int?
   expiresAt       DateTime?
   orderId         String?
   sourceLotId     Int?

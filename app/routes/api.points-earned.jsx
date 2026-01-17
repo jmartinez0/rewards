@@ -185,13 +185,30 @@ export const loader = async ({ request }) => {
     }
 
     const totalAmount = order.currentTotalPriceSet?.shopMoney?.amount ?? null;
-    const pointsPerDollar = Number(metafield.value ?? 0);
+    const rawPointsPerDollar = metafield?.value ?? null;
+    const pointsPerDollar = Number(rawPointsPerDollar ?? 0);
+
+    logPointsApi("inputs", {
+      orderId: adminOrderId,
+      totalAmount,
+      metafieldType: metafield?.type ?? null,
+      metafieldValue: rawPointsPerDollar,
+      pointsPerDollar,
+    });
 
     if (
       totalAmount == null ||
       !Number.isFinite(pointsPerDollar) ||
       pointsPerDollar <= 0
     ) {
+      logPointsApi("math:skipping", {
+        orderId: adminOrderId,
+        reason: {
+          totalAmountNull: totalAmount == null,
+          pointsPerDollarFinite: Number.isFinite(pointsPerDollar),
+          pointsPerDollar,
+        },
+      });
       return new Response(JSON.stringify({ pointsEarned: 0 }), {
         status: 200,
         headers: {
@@ -207,10 +224,29 @@ export const loader = async ({ request }) => {
     logPointsApi("math", {
       orderId: adminOrderId,
       totalAmount,
+      totalAmountType: typeof totalAmount,
+      parsedOrderTotalCents: orderTotalCents,
       orderTotalCents,
       pointsPerDollar,
       points,
     });
+
+    if (!Number.isFinite(orderTotalCents) || orderTotalCents <= 0) {
+      logPointsApi("math:unexpectedOrderTotalCents", {
+        orderId: adminOrderId,
+        totalAmount,
+        orderTotalCents,
+      });
+    }
+
+    if (!Number.isFinite(points) || points <= 0) {
+      logPointsApi("math:pointsNotPositive", {
+        orderId: adminOrderId,
+        orderTotalCents,
+        pointsPerDollar,
+        points,
+      });
+    }
 
     return new Response(JSON.stringify({ pointsEarned: points }), {
       status: 200,

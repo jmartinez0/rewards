@@ -684,7 +684,7 @@ export default function SettingsPage() {
                     gap="base"
                   >
                     <s-text>
-                      {rule.points} points for {rule.percentOff}% off entire order
+                      {rule.points} points for {rule.percentOff}% off order
                       {!rule.isActive ? " (Inactive)" : ""}
                     </s-text>
                     <s-stack direction="inline" gap="small-400">

@@ -58,6 +58,7 @@ CREATE TABLE "LedgerEntry" (
     "type" "LedgerType" NOT NULL,
     "pointsDelta" INTEGER NOT NULL,
     "remainingPoints" INTEGER,
+    "pointsPerDollar" INTEGER,
     "expiresAt" TIMESTAMP(3),
     "orderId" TEXT,
     "sourceLotId" INTEGER,
