@@ -19,8 +19,8 @@ const shopify = shopifyApp({
   future: {
     expiringOfflineAccessTokens: true,
   },
-  hooks: {
-    afterAuth: async ({ admin, session }) => {
+	  hooks: {
+	    afterAuth: async ({ admin, session }) => {
       const definitions = [
         {
           name: "Rewards points per dollar",
@@ -52,7 +52,7 @@ const shopify = shopifyApp({
         },
       ];
 
-      const metafieldDefinitionCreate = `
+	      const metafieldDefinitionCreate = `
         mutation MetafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
           metafieldDefinitionCreate(definition: $definition) {
             createdDefinition {
@@ -67,92 +67,75 @@ const shopify = shopifyApp({
             }
           }
         }
-      `;
+	      `;
 
-      for (const definition of definitions) {
-        try {
-          const res = await admin.graphql(metafieldDefinitionCreate, {
-            variables: { definition },
-          });
-          const json = await res.json();
-          const payload = json?.data?.metafieldDefinitionCreate;
-          const errors = payload?.userErrors ?? [];
+	      const existingDefinitions = new Set();
 
-          if (errors.length > 0) {
-            console.log(
-              `[afterAuth] metafield definition "${definition.namespace}.${definition.key}" not created:`,
-              errors,
-            );
-          } else {
-            console.log(
-              `[afterAuth] metafield definition created: ${definition.namespace}.${definition.key}`,
-            );
-          }
-        } catch (error) {
-          console.error(
-            `[afterAuth] metafield definition "${definition.namespace}.${definition.key}" failed:`,
-            error,
-          );
-        }
-      }
+	      try {
+	        const queryExisting = `
+	          query ExistingRewardsMetafieldDefinitions($ownerType: MetafieldOwnerType!) {
+	            metafieldDefinitions(first: 250, ownerType: $ownerType, namespace: "rewards") {
+	              nodes {
+	                namespace
+	                key
+	              }
+	            }
+	          }
+	        `;
 
-      try {
-        const shopIdResponse = await admin.graphql(`
-          query ShopId {
-            shop {
-              id
-            }
-          }
-        `);
-        const shopIdJson = await shopIdResponse.json();
-        const ownerId = shopIdJson?.data?.shop?.id ?? null;
+	        const [shopDefsRes, customerDefsRes] = await Promise.all([
+	          admin.graphql(queryExisting, { variables: { ownerType: "SHOP" } }),
+	          admin.graphql(queryExisting, { variables: { ownerType: "CUSTOMER" } }),
+	        ]);
 
-        if (!ownerId) return;
+	        const [shopDefsJson, customerDefsJson] = await Promise.all([
+	          shopDefsRes.json(),
+	          customerDefsRes.json(),
+	        ]);
 
-        const setShopMetafields = `
-          mutation SetShopMetafields($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `;
+	        const shopNodes = shopDefsJson?.data?.metafieldDefinitions?.nodes ?? [];
+	        const customerNodes = customerDefsJson?.data?.metafieldDefinitions?.nodes ?? [];
 
-        const setRes = await admin.graphql(setShopMetafields, {
-          variables: {
-            metafields: [
-              {
-                ownerId,
-                namespace: "rewards",
-                key: "points_per_dollar",
-                type: "number_integer",
-                value: "0",
-              },
-              {
-                ownerId,
-                namespace: "rewards",
-                key: "expiration_days",
-                type: "number_integer",
-                value: "0",
-              },
-            ],
-          },
-        });
-        const setJson = await setRes.json();
-        const setErrors = setJson?.data?.metafieldsSet?.userErrors ?? [];
-        if (setErrors.length > 0) {
-          console.log(
-            `[afterAuth] shop metafields not set for ${session.shop}:`,
-            setErrors,
-          );
-        }
-      } catch (error) {
-        console.error(`[afterAuth] shop metafield setup failed for ${session.shop}:`, error);
-      }
-    },
-  },
+	        [...shopNodes, ...customerNodes].forEach((node) => {
+	          if (!node?.namespace || !node?.key) return;
+	          existingDefinitions.add(`${node.namespace}.${node.key}`);
+	        });
+	      } catch (error) {
+	        console.error(`[afterAuth] failed to query existing metafield definitions for ${session.shop}:`, error);
+	      }
+
+	      for (const definition of definitions) {
+	        const signature = `${definition.namespace}.${definition.key}`;
+	        if (existingDefinitions.has(signature)) {
+	          console.log(`[afterAuth] metafield definition exists: ${signature}`);
+	          continue;
+	        }
+
+	        try {
+	          const res = await admin.graphql(metafieldDefinitionCreate, {
+	            variables: { definition },
+	          });
+	          const json = await res.json();
+	          const payload = json?.data?.metafieldDefinitionCreate;
+	          const errors = payload?.userErrors ?? [];
+
+	          if (errors.length > 0) {
+	            console.log(
+	              `[afterAuth] metafield definition "${signature}" not created:`,
+	              errors,
+	            );
+	          } else {
+	            console.log(`[afterAuth] metafield definition created: ${signature}`);
+	          }
+	        } catch (error) {
+	          console.error(
+	            `[afterAuth] metafield definition "${signature}" failed:`,
+	            error,
+	          );
+	        }
+	      }
+	    },
+	  },
   ...(process.env.SHOP_CUSTOM_DOMAIN
     ? { customShopDomains: [process.env.SHOP_CUSTOM_DOMAIN] }
     : {}),
