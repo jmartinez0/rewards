@@ -51,8 +51,8 @@ export const action = async ({ request }) => {
     return {
       discountRules: rules.map((rule) => ({
         points: rule.points,
-        percent_off: rule.percentOff,
-        is_active: Boolean(rule.isActive),
+        percentOff: rule.percentOff,
+        isActive: Boolean(rule.isActive),
       })),
     };
   };
@@ -324,6 +324,13 @@ export const action = async ({ request }) => {
                 key: "expiration_days"
                 type: "number_integer"
                 value: "${expirationDaysForMetafield}"
+              }
+              {
+                ownerId: "${ownerId}"
+                namespace: "rewards"
+                key: "is_active"
+                type: "boolean"
+                value: "${isActive ? "true" : "false"}"
               }
             ]
           ) {

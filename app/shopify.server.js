@@ -37,6 +37,13 @@ const shopify = shopifyApp({
           ownerType: "SHOP",
         },
         {
+          name: "Rewards active",
+          namespace: "rewards",
+          key: "is_active",
+          type: "boolean",
+          ownerType: "SHOP",
+        },
+        {
           name: "Rewards current points",
           namespace: "rewards",
           key: "current_points",
