@@ -37,6 +37,13 @@ const shopify = shopifyApp({
           ownerType: "SHOP",
         },
         {
+          name: "Rewards discount rules",
+          namespace: "rewards",
+          key: "discount_rules",
+          type: "json",
+          ownerType: "SHOP",
+        },
+        {
           name: "Rewards minimum points for discount",
           namespace: "rewards",
           key: "min_points_for_discount",
