@@ -69,12 +69,19 @@ export const action = async ({ request }) => {
     return shopIdJson?.data?.shop?.id ?? null;
   };
 
-  const setDiscountRulesMetafield = async (rules) => {
+  const setDiscountMetafields = async (rules) => {
     const ownerId = await getShopOwnerId();
     if (!ownerId) return;
 
+    const minPoints = rules
+      .filter((rule) => rule.isActive)
+      .reduce(
+        (min, rule) => (min == null || rule.points < min ? rule.points : min),
+        null,
+      );
+
     const mutation = `
-      mutation SetDiscountRules($metafields: [MetafieldsSetInput!]!) {
+      mutation SetDiscountMetafields($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
           userErrors {
             field
@@ -84,7 +91,7 @@ export const action = async ({ request }) => {
       }
     `;
 
-    const value = JSON.stringify(getDiscountRulesPayload(rules));
+    const discountRulesValue = JSON.stringify(getDiscountRulesPayload(rules));
 
     const metafieldResponse = await admin.graphql(mutation, {
       variables: {
@@ -92,9 +99,16 @@ export const action = async ({ request }) => {
           {
             ownerId,
             namespace: "rewards",
+            key: "min_points_for_discount",
+            type: "number_integer",
+            value: String(minPoints ?? 0),
+          },
+          {
+            ownerId,
+            namespace: "rewards",
             key: "discount_rules",
             type: "json",
-            value,
+            value: discountRulesValue,
           },
         ],
       },
@@ -103,7 +117,7 @@ export const action = async ({ request }) => {
     const metafieldJson = await metafieldResponse.json();
     const userErrors = metafieldJson?.data?.metafieldsSet?.userErrors ?? [];
     if (userErrors.length > 0) {
-      console.error("Failed to set rewards.discount_rules: ", userErrors);
+      console.error("Failed to set rewards discount metafields: ", userErrors);
     }
   };
 
@@ -214,7 +228,7 @@ export const action = async ({ request }) => {
       });
     }
 
-    await setDiscountRulesMetafield(rules);
+    await setDiscountMetafields(rules);
 
     return { ok: true, intent, savedAt: Date.now() };
   }
@@ -243,7 +257,7 @@ export const action = async ({ request }) => {
       });
     }
 
-    await setDiscountRulesMetafield(rules);
+    await setDiscountMetafields(rules);
 
     return { ok: true, intent, savedAt: Date.now() };
   }
