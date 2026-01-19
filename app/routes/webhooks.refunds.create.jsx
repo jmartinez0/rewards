@@ -25,6 +25,27 @@ const parseMoneyToCents = (amount) => {
   return negative ? -cents : cents;
 };
 
+const getNoteAttributesMap = (order) => {
+  const entries = Array.isArray(order?.customAttributes)
+    ? order.customAttributes
+    : [];
+  const map = new Map();
+  for (const entry of entries) {
+    const key = entry?.key != null ? String(entry.key) : "";
+    if (!key) continue;
+    map.set(key, entry?.value != null ? String(entry.value) : "");
+  }
+  return map;
+};
+
+const parsePositiveInt = (value) => {
+  const normalized = String(value ?? "").trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+};
+
 const getCustomerGid = (shopifyCustomerId) => {
   if (!shopifyCustomerId) return null;
   const raw = String(shopifyCustomerId);
@@ -193,6 +214,25 @@ const fetchOrderSummary = async ({ shopDomain, orderNumericId }) => {
       order(id: $id) {
         id
         email
+        originalTotalPriceSet {
+          shopMoney {
+            amount
+          }
+        }
+        totalPriceSet {
+          shopMoney {
+            amount
+          }
+        }
+        currentTotalPriceSet {
+          shopMoney {
+            amount
+          }
+        }
+        customAttributes {
+          key
+          value
+        }
         customer {
           id
           email
@@ -277,6 +317,15 @@ export const action = async ({ request }) => {
   const email = order?.email ?? order?.customer?.email ?? null;
   const shopifyCustomerId = order?.customer?.id ?? null;
   const name = getOrderNameFromSummary(order) ?? email;
+  const noteAttributes = getNoteAttributesMap(order);
+  const pointsSpentOnOrder = parsePositiveInt(noteAttributes.get("Points spent"));
+  const orderTotalCents = parseMoneyToCents(
+    order?.originalTotalPriceSet?.shopMoney?.amount ??
+      order?.totalPriceSet?.shopMoney?.amount ??
+      order?.currentTotalPriceSet?.shopMoney?.amount ??
+      null,
+  );
+  const orderNumericIdForNotes = orderNumericId ?? getOrderNumericId(refund);
 
   if (!orderId) {
     logWebhook("skipping (missing orderId)", { requestId, refundId });
@@ -292,21 +341,25 @@ export const action = async ({ request }) => {
 
   try {
     updatedCustomerForMetafield = await db.$transaction(async (tx) => {
-      const existingRefundAdjust =
-        refundId
-          ? await tx.ledgerEntry.findFirst({
-              where: {
-                type: "ADJUST",
-                orderId,
-                notes: `Refund from order ${orderId}`,
-              },
-            })
-          : null;
+      const refundMarker = refundId
+        ? String(refundId).match(/(\d+)$/)?.[1] ?? String(refundId)
+        : null;
+      const refundNotesSuffix = refundMarker ? ` [refund:${refundMarker}]` : "";
 
-      if (existingRefundAdjust) {
+      const existingRefundProcess = refundMarker
+        ? await tx.ledgerEntry.findFirst({
+            where: {
+              type: "ADJUST",
+              orderId,
+              notes: { contains: refundNotesSuffix },
+            },
+          })
+        : null;
+
+      if (existingRefundProcess) {
         logWebhook("skipping (refund already processed)", {
           requestId,
-          existingRefundAdjustId: existingRefundAdjust.id,
+          existingRefundAdjustId: existingRefundProcess.id,
         });
 
         const existingCustomer = shopifyCustomerId
@@ -424,6 +477,80 @@ export const action = async ({ request }) => {
       // Refunds only deplete from the earn lot for this order.
       const removablePoints = Math.min(pointsToRemove, earnLotRemaining);
 
+      let customerCurrentPoints = customer.currentPoints;
+
+      if (pointsSpentOnOrder && pointsSpentOnOrder > 0) {
+        const spentPointsRefundEstimate =
+          orderTotalCents > 0
+            ? Math.floor((pointsSpentOnOrder * refundTotalCents) / orderTotalCents)
+            : Math.min(pointsSpentOnOrder, Math.max(0, pointsToRemove));
+
+        const spentPointsRefundable = Math.max(
+          0,
+          Math.min(pointsSpentOnOrder, spentPointsRefundEstimate),
+        );
+
+        const alreadyRefundedSpentPointsResult = await tx.ledgerEntry.aggregate({
+          where: {
+            type: "ADJUST",
+            orderId,
+            pointsDelta: { gt: 0 },
+            notes: { startsWith: "Refunded points from order " },
+          },
+          _sum: { pointsDelta: true },
+        });
+
+        const alreadyRefundedSpentPoints = Math.max(
+          0,
+          alreadyRefundedSpentPointsResult?._sum?.pointsDelta ?? 0,
+        );
+
+        const remainingRefundableSpentPoints = Math.max(
+          0,
+          pointsSpentOnOrder - alreadyRefundedSpentPoints,
+        );
+
+        const pointsToRefund = Math.min(
+          remainingRefundableSpentPoints,
+          spentPointsRefundable,
+        );
+
+        if (pointsToRefund > 0) {
+          logWebhook("Refunding spent points", {
+            requestId,
+            orderId,
+            refundId,
+            pointsSpentOnOrder,
+            orderTotalCents,
+            refundTotalCents,
+            spentPointsRefundEstimate,
+            alreadyRefundedSpentPoints,
+            pointsToRefund,
+          });
+
+          const now = new Date();
+          const refundExpiresAt = config.pointsExpirationDays
+            ? new Date(
+                now.getTime() + config.pointsExpirationDays * 24 * 60 * 60 * 1000,
+              )
+            : null;
+
+          await tx.ledgerEntry.create({
+            data: {
+              customerId: customer.id,
+              type: "ADJUST",
+              pointsDelta: pointsToRefund,
+              remainingPoints: pointsToRefund,
+              expiresAt: refundExpiresAt,
+              notes: `Refunded points from order ${orderNumericIdForNotes ?? orderId}${refundNotesSuffix}`,
+              orderId,
+            },
+          });
+
+          customerCurrentPoints += pointsToRefund;
+        }
+      }
+
       if (pointsToRemove <= 0 || removablePoints <= 0) {
         logWebhook("skipping (no refundable points remaining in earn lot)", {
           requestId,
@@ -432,44 +559,44 @@ export const action = async ({ request }) => {
           pointsToRemove,
           earnLotRemaining,
           removablePoints,
+          pointsSpentOnOrder,
         });
-        return {
-          currentPoints: customer.currentPoints,
-          shopifyCustomerId: customer.shopifyCustomerId,
-        };
-      }
-
-      logWebhook("Creating refund adjust ledger entry", {
-        requestId,
-        customerId: customer.id,
-        orderId,
-        refundId,
-        pointsDelta: -removablePoints,
-        pointsPerDollar: effectivePointsPerDollar,
-      });
-
-      await tx.ledgerEntry.update({
-        where: { id: earnLot.id },
-        data: { remainingPoints: Math.max(0, earnLotRemaining - removablePoints) },
-      });
-
-      await tx.ledgerEntry.create({
-        data: {
+      } else {
+        logWebhook("Creating refund adjust ledger entry", {
+          requestId,
           customerId: customer.id,
-          type: "ADJUST",
+          orderId,
+          refundId,
           pointsDelta: -removablePoints,
           pointsPerDollar: effectivePointsPerDollar,
-          notes: `Refund from order ${orderId}`,
-          orderId,
-          sourceLotId: earnLot?.id ?? null,
-        },
-      });
+          pointsSpentOnOrder,
+        });
+
+        await tx.ledgerEntry.update({
+          where: { id: earnLot.id },
+          data: { remainingPoints: Math.max(0, earnLotRemaining - removablePoints) },
+        });
+
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: customer.id,
+            type: "ADJUST",
+            pointsDelta: -removablePoints,
+            pointsPerDollar: effectivePointsPerDollar,
+            notes: `Refund from order ${orderNumericIdForNotes ?? orderId}${refundNotesSuffix}`,
+            orderId,
+            sourceLotId: earnLot?.id ?? null,
+          },
+        });
+
+        const decrement = Math.min(removablePoints, customerCurrentPoints);
+        customerCurrentPoints = Math.max(0, customerCurrentPoints - decrement);
+      }
 
       const updatedCustomer = await tx.customer.update({
         where: { id: customer.id },
         data: {
-          // Clamp to avoid negative balance if DB drift exists.
-          currentPoints: { decrement: Math.min(removablePoints, customer.currentPoints) },
+          currentPoints: customerCurrentPoints,
         },
         select: {
           currentPoints: true,

@@ -8,7 +8,7 @@ import {
   useSubscription,
 } from "@shopify/ui-extensions/checkout/preact";
 
-const DEFAULT_APP_URL = "https://jm-rewards-staging.vercel.app";
+const DEFAULT_APP_URL = process.env.SHOPIFY_APP_URL;
 
 const loadedOrders = new Set();
 

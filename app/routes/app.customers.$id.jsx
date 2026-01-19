@@ -537,15 +537,16 @@ export default function CustomerDetails() {
                   Expires: {formatDateMMDDYYYY(entry.expiresAt)}
                 </s-text>
               ) : null}
-		              {entry.type === "ADJUST" ? (
+			              {entry.type === "ADJUST" ? (
 			                (() => {
 			                  const rawNotes =
 			                    row.kind === "adjust_group"
 			                      ? row.entries?.[0]?.notes
 			                      : entry.notes;
-			                  const reason = rawNotes?.trim();
+			                  const reason = stripRefundMarker(rawNotes?.trim());
 	                  const numericReasonOrderId =
-	                    reason?.startsWith("Refund from order ")
+	                    reason?.startsWith("Refund from order ") ||
+	                    reason?.startsWith("Refunded points from order ")
 	                      ? getTrailingNumericId(reason)
 	                      : null;
                   const reasonOrderAdminHref =
@@ -553,10 +554,16 @@ export default function CustomerDetails() {
                       ? `https://admin.shopify.com/store/${storeSlug}/orders/${numericReasonOrderId}`
                       : undefined;
 
-                  if (reason?.startsWith("Refund from order ") && numericReasonOrderId) {
+                  if (
+                    (reason?.startsWith("Refund from order ") ||
+                      reason?.startsWith("Refunded points from order ")) &&
+                    numericReasonOrderId
+                  ) {
                     return (
                       <s-text>
-                        Reason: Refund from order{" "}
+                        Reason: {reason.startsWith("Refunded points from order ")
+                          ? "Refunded points from order "
+                          : "Refund from order "}
                         {reasonOrderAdminHref ? (
                           <s-link
                             href={reasonOrderAdminHref}
@@ -603,7 +610,7 @@ export default function CustomerDetails() {
 	                            </s-paragraph>
 	                          ) : (
 	                            <s-paragraph>
-	                              Reason: {depletion.notes?.trim() || "—"}
+	                              Reason: {stripRefundMarker(depletion.notes?.trim() || "") || "—"}
 	                            </s-paragraph>
 	                          )}
 	                        </s-tooltip>
@@ -703,6 +710,11 @@ function getTrailingNumericId(value) {
   if (typeof value !== "string") return null;
   const match = value.match(/(\d+)$/);
   return match ? match[1] : null;
+}
+
+function stripRefundMarker(value) {
+  if (typeof value !== "string") return value;
+  return value.replace(/\s*\[refund:[^\]]+\]\s*$/i, "").trim();
 }
 
 function getAdjustByError({ adjustmentType, adjustBy, currentPoints }) {

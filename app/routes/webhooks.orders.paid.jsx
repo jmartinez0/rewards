@@ -362,6 +362,17 @@ export const action = async ({ request }) => {
             const spendablePoints = Math.max(0, customer.currentPoints);
             const pointsToSpend = Math.min(pointsToSpendRequested, spendablePoints);
 
+            if (pointsToSpendRequested > spendablePoints) {
+              logWebhook("Spend exceeds available points", {
+                requestId,
+                customerId: customer.id,
+                orderId,
+                pointsToSpendRequested,
+                spendablePoints,
+                pointsToSpend,
+              });
+            }
+
             logWebhook("Processing spend", {
               requestId,
               customerId: customer.id,
