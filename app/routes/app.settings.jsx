@@ -736,7 +736,7 @@ export default function SettingsPage() {
             )}
           </s-stack>
 
-          <s-modal id="addDiscountRule" heading="Add discount rule">
+          <s-modal id="addDiscountRule" heading="Create discount rule">
             <s-stack direction="block" gap="base">
               <s-text-field
                 label="Points"

@@ -1,0 +1,22 @@
+api_version = "2025-10"
+
+[[extensions]]
+name = "account-points-ui"
+handle = "account-points-ui"
+type = "ui_extension"
+uid = "8fa9bee2-622a-ba75-5b2d-6663d570694f1e687291"
+
+[[extensions.targeting]]
+module = "./src/AccountPoints.jsx"
+target = "customer-account.profile.block.render"
+
+[extensions.capabilities]
+api_access = true
+network_access = true
+
+[extensions.settings]
+[[extensions.settings.fields]]
+key = "shop_domain"
+type = "single_line_text_field"
+name = "Shop domain"
+description = "The .myshopify.com domain for this store, e.g. resonix-sound-solutions.myshopify.com"
