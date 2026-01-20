@@ -14,17 +14,18 @@ const getCustomerGid = (shopifyCustomerId) => {
   return match ? `gid://shopify/Customer/${match[1]}` : null;
 };
 
-const setCustomerCurrentPointsMetafield = async ({
+const setCustomerRewardsMetafields = async ({
   admin,
   shopifyCustomerId,
-  currentPoints,
+  currentRewardsCents,
+  lifetimeRewardsCents,
 }) => {
   const ownerId = getCustomerGid(shopifyCustomerId);
   if (!ownerId) return;
 
   try {
     const mutation = `
-      mutation SetCustomerPoints($metafields: [MetafieldsSetInput!]!) {
+      mutation SetCustomerRewards($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
           userErrors {
             field
@@ -40,9 +41,16 @@ const setCustomerCurrentPointsMetafield = async ({
           {
             ownerId,
             namespace: "rewards",
-            key: "current_points",
+            key: "current_rewards",
             type: "number_integer",
-            value: String(currentPoints),
+            value: String(currentRewardsCents),
+          },
+          {
+            ownerId,
+            namespace: "rewards",
+            key: "lifetime_rewards",
+            type: "number_integer",
+            value: String(lifetimeRewardsCents),
           },
         ],
       },
@@ -51,17 +59,32 @@ const setCustomerCurrentPointsMetafield = async ({
     const json = await response.json();
     const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
     if (userErrors.length > 0) {
-      console.error("Failed to set customer current_points metafield", {
+      console.error("Failed to set customer rewards metafields", {
         ownerId,
         userErrors,
       });
     }
   } catch (error) {
-    console.error("Error setting customer current_points metafield", {
+    console.error("Error setting customer rewards metafields", {
       ownerId,
       error: error?.message ?? String(error),
     });
   }
+};
+
+const parseDollarsToCents = (value) => {
+  if (value == null) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+
+  const match = normalized.match(/^(\d+)(?:\.(\d{1,2}))?$/);
+  if (!match) return null;
+
+  const dollars = Number(match[1] || "0");
+  const cents = Number(((match[2] || "") + "00").slice(0, 2));
+  if (!Number.isFinite(dollars) || !Number.isFinite(cents)) return null;
+
+  return dollars * 100 + cents;
 };
 
 export const loader = async ({ request, params }) => {
@@ -106,7 +129,7 @@ export const action = async ({ request, params }) => {
 
   const formData = await request.formData();
   const intent = String(formData.get("intent") ?? "");
-  if (intent !== "adjust_points") {
+  if (intent !== "adjust_rewards") {
     return { ok: false, errors: { form: "Unsupported action" } };
   }
 
@@ -116,8 +139,8 @@ export const action = async ({ request, params }) => {
 
   const errors = {};
 
-  const adjustBy = Number(adjustByRaw);
-  if (!adjustByRaw || !Number.isFinite(adjustBy) || !Number.isInteger(adjustBy)) {
+  const adjustByCents = parseDollarsToCents(adjustByRaw);
+  if (!adjustByRaw || adjustByCents == null) {
     errors.adjustBy = "Must be a number";
   }
 
@@ -131,12 +154,15 @@ export const action = async ({ request, params }) => {
   }
 
   if (adjustmentType === "increase") {
-    if (!errors.adjustBy && adjustBy <= 0) {
-      errors.adjustBy = "Must be a positive integer";
+    if (!errors.adjustBy && adjustByCents <= 0) {
+      errors.adjustBy = "Must be a positive number";
     }
   } else if (adjustmentType === "decrease") {
-    if (!errors.adjustBy && (adjustBy < 1 || adjustBy > customer.currentPoints)) {
-      errors.adjustBy = `Must be between 1-${customer.currentPoints}`;
+    if (
+      !errors.adjustBy &&
+      (adjustByCents < 1 || adjustByCents > customer.currentRewardsCents)
+    ) {
+      errors.adjustBy = `Must be between $0.01-$${formatDollars(customer.currentRewardsCents)}`;
     }
   } else {
     errors.adjustmentType = "Select increase or decrease";
@@ -146,26 +172,26 @@ export const action = async ({ request, params }) => {
     return { ok: false, errors };
   }
 
-  const config = await db.config.findFirst({ orderBy: { id: "asc" } });
+  const config = await db.config.findUnique({ where: { id: 1 } });
   const now = new Date();
   const expiresAt =
-    adjustmentType === "increase" && config?.pointsExpirationDays
+    adjustmentType === "increase" && config?.expirationDays
       ? new Date(
-        now.getTime() + config.pointsExpirationDays * 24 * 60 * 60 * 1000,
+        now.getTime() + config.expirationDays * 24 * 60 * 60 * 1000,
       )
       : null;
 
-  const pointsDelta = adjustmentType === "decrease" ? -adjustBy : adjustBy;
-  const nextCurrentPoints = customer.currentPoints + pointsDelta;
+  const rewardsDeltaCents =
+    adjustmentType === "decrease" ? -adjustByCents : adjustByCents;
 
   await db.$transaction(async (tx) => {
-    if (pointsDelta > 0) {
+    if (rewardsDeltaCents > 0) {
       await tx.ledgerEntry.create({
         data: {
           customerId: customer.id,
           type: "ADJUST",
-          pointsDelta,
-          remainingPoints: pointsDelta,
+          rewardsDeltaCents,
+          remainingRewardsCents: rewardsDeltaCents,
           expiresAt,
           notes: reason,
           createdAt: now,
@@ -177,12 +203,12 @@ export const action = async ({ request, params }) => {
       const lots = await tx.ledgerEntry.findMany({
         where: {
           customerId: customer.id,
-          remainingPoints: { gt: 0 },
+          remainingRewardsCents: { gt: 0 },
           AND: [
             {
               OR: [
                 { type: "EARN" },
-                { type: "ADJUST", pointsDelta: { gt: 0 } },
+                { type: "ADJUST", rewardsDeltaCents: { gt: 0 } },
               ],
             },
             {
@@ -196,24 +222,30 @@ export const action = async ({ request, params }) => {
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         select: {
           id: true,
-          remainingPoints: true,
+          remainingRewardsCents: true,
         },
       });
 
       const totalAvailable = lots.reduce((sum, lot) => {
-        const lotRemaining = typeof lot.remainingPoints === "number" ? lot.remainingPoints : 0;
+        const lotRemaining =
+          typeof lot.remainingRewardsCents === "number"
+            ? lot.remainingRewardsCents
+            : 0;
         return sum + Math.max(0, lotRemaining);
       }, 0);
 
-      if (totalAvailable <= 0 || Math.abs(pointsDelta) > totalAvailable) {
-        throw new Response("Not enough available points to decrease.", { status: 400 });
+      if (totalAvailable <= 0 || Math.abs(rewardsDeltaCents) > totalAvailable) {
+        throw new Response("Not enough available rewards to decrease.", { status: 400 });
       }
 
-      let remainingToRemove = Math.abs(pointsDelta);
+      let remainingToRemove = Math.abs(rewardsDeltaCents);
 
       for (const lot of lots) {
         if (remainingToRemove <= 0) break;
-        const lotRemaining = typeof lot.remainingPoints === "number" ? lot.remainingPoints : 0;
+        const lotRemaining =
+          typeof lot.remainingRewardsCents === "number"
+            ? lot.remainingRewardsCents
+            : 0;
         if (lotRemaining <= 0) continue;
 
         const take = Math.min(lotRemaining, remainingToRemove);
@@ -221,15 +253,15 @@ export const action = async ({ request, params }) => {
 
         await tx.ledgerEntry.update({
           where: { id: lot.id },
-          data: { remainingPoints: Math.max(0, lotRemaining - take) },
+          data: { remainingRewardsCents: Math.max(0, lotRemaining - take) },
         });
 
         await tx.ledgerEntry.create({
           data: {
             customerId: customer.id,
             type: "ADJUST",
-            pointsDelta: -take,
-            remainingPoints: null,
+            rewardsDeltaCents: -take,
+            remainingRewardsCents: null,
             expiresAt: null,
             notes: reason,
             createdAt: now,
@@ -243,20 +275,30 @@ export const action = async ({ request, params }) => {
     await tx.customer.update({
       where: { id: customer.id },
       data: {
-        currentPoints:
-          pointsDelta > 0
-            ? { increment: pointsDelta }
-            : { decrement: Math.abs(pointsDelta) },
-        ...(pointsDelta > 0 ? { lifetimePoints: { increment: pointsDelta } } : {}),
+        currentRewardsCents:
+          rewardsDeltaCents > 0
+            ? { increment: rewardsDeltaCents }
+            : { decrement: Math.abs(rewardsDeltaCents) },
+        ...(rewardsDeltaCents > 0
+          ? { lifetimeRewardsCents: { increment: rewardsDeltaCents } }
+          : {}),
       },
     });
   });
 
-  await setCustomerCurrentPointsMetafield({
-    admin,
-    shopifyCustomerId: customer.shopifyCustomerId,
-    currentPoints: nextCurrentPoints,
+  const updatedCustomer = await db.customer.findUnique({
+    where: { id: customer.id },
+    select: { currentRewardsCents: true, lifetimeRewardsCents: true, shopifyCustomerId: true },
   });
+
+  if (updatedCustomer) {
+    await setCustomerRewardsMetafields({
+      admin,
+      shopifyCustomerId: updatedCustomer.shopifyCustomerId,
+      currentRewardsCents: updatedCustomer.currentRewardsCents,
+      lifetimeRewardsCents: updatedCustomer.lifetimeRewardsCents,
+    });
+  }
 
   return { ok: true, savedAt: Date.now() };
 };
@@ -282,16 +324,16 @@ export default function CustomerDetails() {
   const adjustByError = getAdjustByError({
     adjustmentType,
     adjustBy,
-    currentPoints: customer.currentPoints,
+    currentRewardsCents: customer.currentRewardsCents,
   });
   const reasonError = getReasonError(adjustReason);
   const serverAdjustByError = fetcher.data?.errors?.adjustBy;
   const serverReasonError = fetcher.data?.errors?.reason;
   const canSaveAdjustment =
     !adjustByError && !reasonError && fetcher.state === "idle";
-  const afterAdjustmentPoints = getAfterAdjustmentPoints({
+  const afterAdjustmentRewardsCents = getAfterAdjustmentRewardsCents({
     adjustmentType,
-    currentPoints: customer.currentPoints,
+    currentRewardsCents: customer.currentRewardsCents,
     adjustBy,
   });
 
@@ -302,7 +344,7 @@ export default function CustomerDetails() {
 
     lastAdjustmentSavedAtRef.current = fetcher.data.savedAt;
 
-    const modalEl = document.getElementById("adjustPoints");
+    const modalEl = document.getElementById("adjustRewards");
     if (modalEl && typeof modalEl.hideOverlay === "function") {
       modalEl.hideOverlay();
     }
@@ -313,7 +355,7 @@ export default function CustomerDetails() {
     setAdjustTouched(false);
 
     if (shopify?.toast) {
-      shopify.toast.show("Points adjusted");
+      shopify.toast.show("Rewards adjusted");
     }
 
     revalidator.revalidate();
@@ -365,11 +407,11 @@ export default function CustomerDetails() {
 
           <s-section>
             <s-stack direction="block" gap="base">
-              <s-heading>Points</s-heading>
-              <s-text>Current points: {formatNumber(customer.currentPoints)}</s-text>
-              <s-text>Lifetime points: {formatNumber(customer.lifetimePoints)}</s-text>
-              <s-button commandFor="adjustPoints">
-                Adjust points
+              <s-heading>Rewards</s-heading>
+              <s-text>Current rewards: {formatMoney(customer.currentRewardsCents)}</s-text>
+              <s-text>Lifetime rewards: {formatMoney(customer.lifetimeRewardsCents)}</s-text>
+              <s-button commandFor="adjustRewards">
+                Adjust rewards
               </s-button>
             </s-stack>
           </s-section>
@@ -384,7 +426,7 @@ export default function CustomerDetails() {
               <s-table-header-row>
                 <s-table-header><s-box padding="none small-400">Date</s-box></s-table-header>
                 <s-table-header>Type</s-table-header>
-                <s-table-header>Points</s-table-header>
+                <s-table-header>Rewards</s-table-header>
               </s-table-header-row>
               <s-table-body>
                 {historyRows.length ? (
@@ -397,7 +439,7 @@ export default function CustomerDetails() {
                         ? modalIdForSpendGroup(row.orderId)
                         : row.kind === "adjust_group"
                           ? modalIdForAdjustGroup(row.adjustmentGroupId)
-                        : modalIdForEntry(entry.id);
+                          : modalIdForEntry(entry.id);
 
                     return (
                       <s-table-row key={entry.id} clickDelegate={rowId}>
@@ -405,7 +447,7 @@ export default function CustomerDetails() {
                           <s-box padding="none none none small-400">{formatDateMMDDYYYY(entry.createdAt)}</s-box>
                         </s-table-cell>
                         <s-table-cell>{formatLedgerType(entry.type)}</s-table-cell>
-                        <s-table-cell>{formatSignedPoints(entry.pointsDelta)}</s-table-cell>
+                        <s-table-cell>{formatSignedMoney(entry.rewardsDeltaCents)}</s-table-cell>
                         <s-link id={rowId} commandFor={modalId} />
                       </s-table-row>
                     );
@@ -431,21 +473,21 @@ export default function CustomerDetails() {
             ? modalIdForSpendGroup(row.orderId)
             : row.kind === "adjust_group"
               ? modalIdForAdjustGroup(row.adjustmentGroupId)
-            : modalIdForEntry(entry.id);
-        const pointsLabel = getPointsLabel(entry.type, entry.pointsDelta);
+              : modalIdForEntry(entry.id);
+        const rewardsLabel = getRewardsLabel(entry.type, entry.rewardsDeltaCents);
         const numericOrderId = getTrailingNumericId(entry.orderId);
         const orderAdminHref =
           numericOrderId && storeSlug
             ? `https://admin.shopify.com/store/${storeSlug}/orders/${numericOrderId}`
             : undefined;
-        const pointsSpentFromLots =
-          entry.type === "SPEND" ? getPointsSpentFromLots(row) : null;
-        const pointsRemovedFromLots =
-          entry.type === "ADJUST" && entry.pointsDelta < 0
-            ? getPointsRemovedFromLots(row)
+        const rewardsSpentFromLots =
+          entry.type === "SPEND" ? getRewardsSpentFromLots(row) : null;
+        const rewardsRemovedFromLots =
+          entry.type === "ADJUST" && entry.rewardsDeltaCents < 0
+            ? getRewardsRemovedFromLots(row)
             : null;
-        const pointsDepletedBy =
-          row.kind === "single" ? getPointsDepletedBy(entry) : null;
+        const rewardsDepletedBy =
+          row.kind === "single" ? getRewardsDepletedBy(entry) : null;
 
         return (
           <s-modal
@@ -474,34 +516,34 @@ export default function CustomerDetails() {
                   )}
                 </s-text>
               ) : null}
-		              {pointsLabel ? (
-		                <s-text>{pointsLabel}: {formatNumber(Math.abs(entry.pointsDelta))}</s-text>
-		              ) : null}
-	              {pointsRemovedFromLots && pointsRemovedFromLots.length ? (
-	                <s-unordered-list>
-	                  {pointsRemovedFromLots.map((lot) => (
-	                    <s-list-item key={lot.key}>
-	                      <s-stack
-	                        direction="inline"
-	                        alignItems="center"
-	                        gap="small-400"
-	                      >
-	                        <s-text>{lot.label}</s-text>
-	                        <s-icon type="info" interestFor={lot.tooltipId} />
-	                      </s-stack>
-	                      <s-tooltip id={lot.tooltipId}>
-	                        {renderLotTooltipContent(lot.sourceLot)}
-	                      </s-tooltip>
-	                    </s-list-item>
-	                  ))}
-	                </s-unordered-list>
-	              ) : null}
-		              {pointsSpentFromLots ? (
-		                <s-stack direction="block" gap="small-200">
-		                  <s-text>Points spent from:</s-text>
-	                  {pointsSpentFromLots.length ? (
+              {rewardsLabel ? (
+                <s-text>{rewardsLabel}: {formatMoney(Math.abs(entry.rewardsDeltaCents))}</s-text>
+              ) : null}
+              {rewardsRemovedFromLots && rewardsRemovedFromLots.length ? (
+                <s-unordered-list>
+                  {rewardsRemovedFromLots.map((lot) => (
+                    <s-list-item key={lot.key}>
+                      <s-stack
+                        direction="inline"
+                        alignItems="center"
+                        gap="small-400"
+                      >
+                        <s-text>{lot.label}</s-text>
+                        <s-icon type="info" interestFor={lot.tooltipId} />
+                      </s-stack>
+                      <s-tooltip id={lot.tooltipId}>
+                        {renderLotTooltipContent(lot.sourceLot)}
+                      </s-tooltip>
+                    </s-list-item>
+                  ))}
+                </s-unordered-list>
+              ) : null}
+              {rewardsSpentFromLots ? (
+                <s-stack direction="block" gap="small-200">
+                  <s-text>Rewards spent from:</s-text>
+                  {rewardsSpentFromLots.length ? (
                     <s-unordered-list>
-                      {pointsSpentFromLots.map((lot) => (
+                      {rewardsSpentFromLots.map((lot) => (
                         <s-list-item key={lot.key}>
                           <s-stack
                             direction="inline"
@@ -529,7 +571,7 @@ export default function CustomerDetails() {
               ) : null}
               {entry.type === "EARN" ? (
                 <s-text>
-                  Points remaining: {formatNumber(entry.remainingPoints)}
+                  Rewards remaining: {formatMoney(entry.remainingRewardsCents)}
                 </s-text>
               ) : null}
               {entry.type === "EARN" ? (
@@ -537,95 +579,88 @@ export default function CustomerDetails() {
                   Expires: {formatDateMMDDYYYY(entry.expiresAt)}
                 </s-text>
               ) : null}
-			              {entry.type === "ADJUST" ? (
-			                (() => {
-			                  const rawNotes =
-			                    row.kind === "adjust_group"
-			                      ? row.entries?.[0]?.notes
-			                      : entry.notes;
-			                  const reason = stripRefundMarker(rawNotes?.trim());
-	                  const numericReasonOrderId =
-	                    reason?.startsWith("Refund from order ") ||
-	                    reason?.startsWith("Refunded points from order ")
-	                      ? getTrailingNumericId(reason)
-	                      : null;
+              {entry.type === "ADJUST" ? (
+                (() => {
+                  const rawNotes =
+                    row.kind === "adjust_group"
+                      ? row.entries?.[0]?.notes
+                      : entry.notes;
+                  const reason = stripRefundMarker(rawNotes?.trim());
+                  const refundReasonMatches =
+                    reason?.startsWith("Order ") &&
+                    (reason.includes(" was refunded") ||
+                      reason.includes(" was partially refunded"));
                   const reasonOrderAdminHref =
-                    numericReasonOrderId && storeSlug
-                      ? `https://admin.shopify.com/store/${storeSlug}/orders/${numericReasonOrderId}`
+                    numericOrderId && storeSlug
+                      ? `https://admin.shopify.com/store/${storeSlug}/orders/${numericOrderId}`
                       : undefined;
 
-                  if (
-                    (reason?.startsWith("Refund from order ") ||
-                      reason?.startsWith("Refunded points from order ")) &&
-                    numericReasonOrderId
-                  ) {
+                  if (refundReasonMatches && numericOrderId) {
                     return (
                       <s-text>
-                        Reason: {reason.startsWith("Refunded points from order ")
-                          ? "Refunded points from order "
-                          : "Refund from order "}
+                        Reason: Order{" "}
                         {reasonOrderAdminHref ? (
                           <s-link
                             href={reasonOrderAdminHref}
                             target="_blank"
                             rel="noopener noreferrer"
                           >
-                            {numericReasonOrderId}
+                            {numericOrderId}
                           </s-link>
                         ) : (
-                          numericReasonOrderId
-                        )}
+                          numericOrderId
+                        )}{reason.includes("partially") ? " was partially refunded" : " was refunded"}
                       </s-text>
                     );
                   }
 
-		                  return <s-text>Reason: {reason || "—"}</s-text>;
-			                })()
-			              ) : null}
-	              {pointsDepletedBy && pointsDepletedBy.length ? (
-	                <s-stack direction="block" gap="small-200">
-	                  <s-text>Points depleted by:</s-text>
-	                  <s-unordered-list>
-	                    {pointsDepletedBy.map((depletion) => (
-	                      <s-list-item key={depletion.key}>
-	                        <s-stack
-	                          direction="inline"
-	                          alignItems="center"
-	                          gap="small-400"
-	                        >
-	                          <s-text interestFor={depletion.tooltipId}>
-	                            {depletion.label}
-	                          </s-text>
-	                          <s-icon
-	                            type="info"
-	                            interestFor={depletion.tooltipId}
-	                          />
-	                        </s-stack>
-	                        <s-tooltip id={depletion.tooltipId}>
-	                          <s-paragraph>{formatTimestampLong(depletion.createdAt)}</s-paragraph>
-	                          {depletion.orderId ? (
-	                            <s-paragraph>
-	                              Order ID:{" "}
-	                              {getTrailingNumericId(depletion.orderId) ?? "—"}
-	                            </s-paragraph>
-	                          ) : (
-	                            <s-paragraph>
-	                              Reason: {stripRefundMarker(depletion.notes?.trim() || "") || "—"}
-	                            </s-paragraph>
-	                          )}
-	                        </s-tooltip>
-	                      </s-list-item>
-	                    ))}
-	                  </s-unordered-list>
-	                </s-stack>
-	              ) : null}
-	            </s-stack>
-	          </s-modal>
-	        );
-	      })}
+                  return <s-text>Reason: {reason || "—"}</s-text>;
+                })()
+              ) : null}
+              {rewardsDepletedBy && rewardsDepletedBy.length ? (
+                <s-stack direction="block" gap="small-200">
+                  <s-text>Rewards depleted by:</s-text>
+                  <s-unordered-list>
+                    {rewardsDepletedBy.map((depletion) => (
+                      <s-list-item key={depletion.key}>
+                        <s-stack
+                          direction="inline"
+                          alignItems="center"
+                          gap="small-400"
+                        >
+                          <s-text interestFor={depletion.tooltipId}>
+                            {depletion.label}
+                          </s-text>
+                          <s-icon
+                            type="info"
+                            interestFor={depletion.tooltipId}
+                          />
+                        </s-stack>
+                        <s-tooltip id={depletion.tooltipId}>
+                          <s-paragraph>{formatTimestampLong(depletion.createdAt)}</s-paragraph>
+                          {depletion.orderId ? (
+                            <s-paragraph>
+                              Order ID:{" "}
+                              {getTrailingNumericId(depletion.orderId) ?? "—"}
+                            </s-paragraph>
+                          ) : (
+                            <s-paragraph>
+                              Reason: {stripRefundMarker(depletion.notes?.trim() || "") || "—"}
+                            </s-paragraph>
+                          )}
+                        </s-tooltip>
+                      </s-list-item>
+                    ))}
+                  </s-unordered-list>
+                </s-stack>
+              ) : null}
+            </s-stack>
+          </s-modal>
+        );
+      })}
       <s-modal
-        id="adjustPoints"
-        heading="Adjust points"
+        id="adjustRewards"
+        heading="Adjust rewards"
         onAfterHide={() => {
           setAdjustBy("");
           setAdjustReason("");
@@ -652,6 +687,7 @@ export default function CustomerDetails() {
           <s-text-field
             label={adjustmentType === "decrease" ? "Decrease by" : "Increase by"}
             name="adjustByField"
+            prefix="$"
             value={adjustBy}
             onChange={(event) => setAdjustBy(event.currentTarget.value)}
             onInput={(event) => setAdjustBy(event.currentTarget.value)}
@@ -668,12 +704,12 @@ export default function CustomerDetails() {
           />
 
           <s-stack gap="small">
-            <s-text>Current points: {formatNumber(customer.currentPoints)} points</s-text>
-            <s-text>After adjustment: {formatNumber(afterAdjustmentPoints)} points</s-text>
+            <s-text>Current rewards: {formatMoney(customer.currentRewardsCents)}</s-text>
+            <s-text>After adjustment: {formatMoney(afterAdjustmentRewardsCents)}</s-text>
           </s-stack>
         </s-stack>
 
-        <s-button slot="secondary-actions" commandFor="adjustPoints" command="--hide">
+        <s-button slot="secondary-actions" commandFor="adjustRewards" command="--hide">
           Close
         </s-button>
         <s-button
@@ -685,7 +721,7 @@ export default function CustomerDetails() {
             setAdjustTouched(true);
             if (!canSaveAdjustment) return;
             const formData = new FormData();
-            formData.set("intent", "adjust_points");
+            formData.set("intent", "adjust_rewards");
             formData.set("adjustmentType", adjustmentType);
             formData.set("adjustBy", adjustBy.trim());
             formData.set("reason", adjustReason.trim());
@@ -717,27 +753,19 @@ function stripRefundMarker(value) {
   return value.replace(/\s*\[refund:[^\]]+\]\s*$/i, "").trim();
 }
 
-function getAdjustByError({ adjustmentType, adjustBy, currentPoints }) {
+function getAdjustByError({ adjustmentType, adjustBy, currentRewardsCents }) {
   const rawValue = adjustBy.trim();
-  if (!rawValue) return "Must be a number";
-
-  const amount = Number(rawValue);
-  if (!Number.isFinite(amount)) return "Must be a number";
-
-  if (!Number.isInteger(amount)) {
-    return adjustmentType === "decrease"
-      ? `Must be between 1-${currentPoints}`
-      : "Must be a positive integer";
-  }
+  const amountCents = parseDollarsToCents(rawValue);
+  if (amountCents == null) return "Must be a number";
 
   if (adjustmentType === "increase") {
-    if (amount <= 0) return "Must be a positive integer";
+    if (amountCents <= 0) return "Must be a positive number";
     return null;
   }
 
   if (adjustmentType === "decrease") {
-    if (amount < 1 || amount > currentPoints) {
-      return `Must be between 1-${currentPoints}`;
+    if (amountCents < 1 || amountCents > currentRewardsCents) {
+      return `Must be between $0.01-${formatMoney(currentRewardsCents)}`;
     }
     return null;
   }
@@ -750,15 +778,15 @@ function getReasonError(reason) {
   return null;
 }
 
-function getAfterAdjustmentPoints({ adjustmentType, currentPoints, adjustBy }) {
-  const amount = Number(adjustBy.trim());
-  if (!Number.isFinite(amount) || amount < 0) return currentPoints;
+function getAfterAdjustmentRewardsCents({ adjustmentType, currentRewardsCents, adjustBy }) {
+  const amountCents = parseDollarsToCents(adjustBy.trim());
+  if (amountCents == null || amountCents < 0) return currentRewardsCents;
 
   if (adjustmentType === "decrease") {
-    return currentPoints - amount;
+    return currentRewardsCents - amountCents;
   }
 
-  return currentPoints + amount;
+  return currentRewardsCents + amountCents;
 }
 
 function formatDateMMDDYYYY(value) {
@@ -799,15 +827,26 @@ function formatTimestampLong(value) {
   return `${month} ${day}, ${year} at ${hour}:${minute} ${dayPeriod}`;
 }
 
-function formatNumber(value) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "-";
-  return new Intl.NumberFormat("en-US").format(value);
+function formatDollars(valueCents) {
+  if (typeof valueCents !== "number" || Number.isNaN(valueCents)) return "0.00";
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(valueCents / 100);
 }
 
-function formatSignedPoints(pointsDelta) {
-  if (typeof pointsDelta !== "number" || Number.isNaN(pointsDelta)) return "-";
-  if (pointsDelta > 0) return `+${formatNumber(pointsDelta)}`;
-  return formatNumber(pointsDelta);
+function formatMoney(valueCents) {
+  if (typeof valueCents !== "number" || Number.isNaN(valueCents)) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(valueCents / 100);
+}
+
+function formatSignedMoney(valueCents) {
+  if (typeof valueCents !== "number" || Number.isNaN(valueCents)) return "-";
+  if (valueCents > 0) return `+${formatMoney(valueCents)}`;
+  return formatMoney(valueCents);
 }
 
 function formatLedgerType(type) {
@@ -825,13 +864,13 @@ function formatLedgerType(type) {
   }
 }
 
-function getPointsLabel(type, pointsDelta) {
-  if (type === "EARN") return "Points earned";
-  if (type === "SPEND") return "Points spent";
+function getRewardsLabel(type, rewardsDeltaCents) {
+  if (type === "EARN") return "Rewards earned";
+  if (type === "SPEND") return "Rewards spent";
 
   if (type === "ADJUST") {
-    if (pointsDelta > 0) return "Points added";
-    if (pointsDelta < 0) return "Points removed";
+    if (rewardsDeltaCents > 0) return "Rewards added";
+    if (rewardsDeltaCents < 0) return "Rewards removed";
   }
 
   return null;
@@ -868,7 +907,7 @@ function buildHistoryRows(entries) {
   });
 
   entries.forEach((entry, index) => {
-    if (entry.type !== "ADJUST" || entry.pointsDelta >= 0) return;
+    if (entry.type !== "ADJUST" || entry.rewardsDeltaCents >= 0) return;
     if (!entry.adjustmentGroupId) return;
     const existing = adjustGroups.get(entry.adjustmentGroupId);
     if (!existing) {
@@ -885,8 +924,8 @@ function buildHistoryRows(entries) {
       const group = spendGroups.get(entry.orderId);
       if (!group || group.firstIndex !== index) return;
 
-      const pointsDelta = group.entries.reduce(
-        (sum, spendEntry) => sum + spendEntry.pointsDelta,
+      const rewardsDeltaCents = group.entries.reduce(
+        (sum, spendEntry) => sum + spendEntry.rewardsDeltaCents,
         0
       );
 
@@ -894,7 +933,7 @@ function buildHistoryRows(entries) {
         kind: "spend_group",
         id: `spend:${entry.orderId}`,
         type: "SPEND",
-        pointsDelta,
+        rewardsDeltaCents,
         createdAt: entry.createdAt,
         orderId: entry.orderId,
         entries: group.entries,
@@ -902,12 +941,12 @@ function buildHistoryRows(entries) {
       return;
     }
 
-    if (entry.type === "ADJUST" && entry.pointsDelta < 0 && entry.adjustmentGroupId) {
+    if (entry.type === "ADJUST" && entry.rewardsDeltaCents < 0 && entry.adjustmentGroupId) {
       const group = adjustGroups.get(entry.adjustmentGroupId);
       if (!group || group.firstIndex !== index) return;
 
-      const pointsDelta = group.entries.reduce(
-        (sum, adjustEntry) => sum + adjustEntry.pointsDelta,
+      const rewardsDeltaCents = group.entries.reduce(
+        (sum, adjustEntry) => sum + adjustEntry.rewardsDeltaCents,
         0
       );
 
@@ -915,7 +954,7 @@ function buildHistoryRows(entries) {
         kind: "adjust_group",
         id: `adjust:${entry.adjustmentGroupId}`,
         type: "ADJUST",
-        pointsDelta,
+        rewardsDeltaCents,
         createdAt: entry.createdAt,
         adjustmentGroupId: entry.adjustmentGroupId,
         entries: group.entries,
@@ -929,7 +968,7 @@ function buildHistoryRows(entries) {
   return rows;
 }
 
-function getPointsSpentFromLots(row) {
+function getRewardsSpentFromLots(row) {
   const spendEntries =
     row && row.kind === "spend_group" && Array.isArray(row.entries)
       ? row.entries
@@ -956,7 +995,7 @@ function getPointsSpentFromLots(row) {
       spent: 0,
     };
 
-    existing.spent += Math.abs(spendEntry?.pointsDelta ?? 0);
+    existing.spent += Math.abs(spendEntry?.rewardsDeltaCents ?? 0);
     if (!existing.earn && spendEntry?.sourceLot) existing.earn = spendEntry.sourceLot;
 
     byLotId.set(lotId, existing);
@@ -978,7 +1017,7 @@ function getPointsSpentFromLots(row) {
             : `Source ${sourceCreatedAt}`;
 
       const parts = [
-        `${formatNumber(item.spent)} points`,
+        `${formatMoney(item.spent)}`,
         sourceLabel,
       ];
 
@@ -991,7 +1030,7 @@ function getPointsSpentFromLots(row) {
     });
 }
 
-function getPointsRemovedFromLots(row) {
+function getRewardsRemovedFromLots(row) {
   const adjustmentEntries =
     row && row.kind === "adjust_group" && Array.isArray(row.entries)
       ? row.entries
@@ -1009,7 +1048,7 @@ function getPointsRemovedFromLots(row) {
   const byLotId = new Map();
 
   adjustmentEntries.forEach((adjustEntry) => {
-    if (adjustEntry?.type !== "ADJUST" || !(adjustEntry?.pointsDelta < 0)) return;
+    if (adjustEntry?.type !== "ADJUST" || !(adjustEntry?.rewardsDeltaCents < 0)) return;
     const lotId = adjustEntry?.sourceLotId;
     if (!lotId) return;
 
@@ -1019,7 +1058,7 @@ function getPointsRemovedFromLots(row) {
       removed: 0,
     };
 
-    existing.removed += Math.abs(adjustEntry?.pointsDelta ?? 0);
+    existing.removed += Math.abs(adjustEntry?.rewardsDeltaCents ?? 0);
     if (!existing.sourceLot && adjustEntry?.sourceLot) existing.sourceLot = adjustEntry.sourceLot;
 
     byLotId.set(lotId, existing);
@@ -1041,7 +1080,7 @@ function getPointsRemovedFromLots(row) {
             : `Source ${sourceCreatedAt}`;
 
       const parts = [
-        `${formatNumber(item.removed)} points`,
+        `${formatMoney(item.removed)}`,
         sourceLabel,
       ];
 
@@ -1054,9 +1093,10 @@ function getPointsRemovedFromLots(row) {
     });
 }
 
-function getPointsDepletedBy(entry) {
+function getRewardsDepletedBy(entry) {
   const isSourceLot =
-    entry?.type === "EARN" || (entry?.type === "ADJUST" && entry?.pointsDelta > 0);
+    entry?.type === "EARN" ||
+    (entry?.type === "ADJUST" && entry?.rewardsDeltaCents > 0);
   if (!isSourceLot) return null;
 
   const depletions = Array.isArray(entry.depletions) ? entry.depletions : [];
@@ -1065,11 +1105,13 @@ function getPointsDepletedBy(entry) {
   return depletions
     .filter((d) => {
       if (d?.type === "SPEND" || d?.type === "EXPIRE") return true;
-      return d?.type === "ADJUST" && d?.pointsDelta < 0;
+      return d?.type === "ADJUST" && d?.rewardsDeltaCents < 0;
     })
     .map((d) => {
       const notes = String(d?.notes ?? "").trim();
-      const isRefund = notes.startsWith("Refund from order ");
+      const isRefund =
+        notes.startsWith("Order ") &&
+        (notes.includes(" was refunded") || notes.includes(" was partially refunded"));
 
       return {
         key: String(d.id),
@@ -1077,7 +1119,7 @@ function getPointsDepletedBy(entry) {
         createdAt: d.createdAt,
         orderId: d.orderId,
         notes,
-        label: `${isRefund ? "Refund" : formatLedgerType(d.type)} ${Math.abs(d.pointsDelta)} points`,
+        label: `${isRefund ? "Refund" : formatLedgerType(d.type)} ${formatMoney(Math.abs(d.rewardsDeltaCents))}`,
       };
     });
 }
@@ -1092,29 +1134,29 @@ function renderLotTooltipContent(sourceLot) {
       <>
         <s-paragraph>{formatTimestampLong(sourceLot.createdAt)}</s-paragraph>
         <s-paragraph>Order ID: {numericOrderId ?? "—"}</s-paragraph>
-        <s-paragraph>Points earned: {formatNumber(sourceLot.pointsDelta)}</s-paragraph>
-        <s-paragraph>Points remaining: {formatNumber(sourceLot.remainingPoints)}</s-paragraph>
+        <s-paragraph>Rewards earned: {formatMoney(sourceLot.rewardsDeltaCents)}</s-paragraph>
+        <s-paragraph>Rewards remaining: {formatMoney(sourceLot.remainingRewardsCents)}</s-paragraph>
         <s-paragraph>Expires: {formatDateMMDDYYYY(sourceLot.expiresAt)}</s-paragraph>
       </>
     );
   }
 
-  if (sourceLot.type === "ADJUST" && sourceLot.pointsDelta > 0) {
+  if (sourceLot.type === "ADJUST" && sourceLot.rewardsDeltaCents > 0) {
     return (
       <>
         <s-paragraph>{formatTimestampLong(sourceLot.createdAt)}</s-paragraph>
-        <s-paragraph>Points added: {sourceLot.pointsDelta}</s-paragraph>
-        <s-paragraph>Points remaining: {formatNumber(sourceLot.remainingPoints)}</s-paragraph>
+        <s-paragraph>Rewards added: {formatMoney(sourceLot.rewardsDeltaCents)}</s-paragraph>
+        <s-paragraph>Rewards remaining: {formatMoney(sourceLot.remainingRewardsCents)}</s-paragraph>
       </>
     );
   }
 
   return (
     <>
-      <s-text>Timestamp: {formatTimestampLong(sourceLot.createdAt)}</s-text>
+      <s-text>{formatTimestampLong(sourceLot.createdAt)}</s-text>
       <s-text>Type: {formatLedgerType(sourceLot.type)}</s-text>
-      <s-text>Points: {sourceLot.pointsDelta}</s-text>
-      <s-text>Points remaining: {formatNumber(sourceLot.remainingPoints)}</s-text>
+      <s-text>Rewards: {formatMoney(sourceLot.rewardsDeltaCents)}</s-text>
+      <s-text>Rewards remaining: {formatMoney(sourceLot.remainingRewardsCents)}</s-text>
     </>
   );
 }

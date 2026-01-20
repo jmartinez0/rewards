@@ -21,8 +21,8 @@ export const loader = async ({ request }) => {
         ...(Number.isNaN(numericQuery)
           ? []
           : [
-            { currentPoints: numericQuery },
-            { lifetimePoints: numericQuery },
+            { currentRewardsCents: numericQuery },
+            { lifetimeRewardsCents: numericQuery },
           ]),
       ],
     }
@@ -30,7 +30,7 @@ export const loader = async ({ request }) => {
 
   const where = searchTerms ?? {};
 
-  const [totalAllCustomers, total, customers, config, discountRuleCount] =
+  const [totalAllCustomers, total, customers, config] =
     await Promise.all([
       db.customer.count(),
       db.customer.count({ where }),
@@ -40,8 +40,7 @@ export const loader = async ({ request }) => {
         take: pageSize,
         skip: (page - 1) * pageSize,
       }),
-      db.config.findFirst({ orderBy: { id: "asc" } }),
-      db.discountRule.count(),
+      db.config.findUnique({ where: { id: 1 } }),
     ]);
 
   return {
@@ -51,9 +50,17 @@ export const loader = async ({ request }) => {
     page,
     pageSize,
     query,
-    configuredPointsPerDollar: Boolean(config?.configuredPointsPerDollar),
-    hasDiscountRule: discountRuleCount > 0,
+    centsToOneUsd: config?.centsToOneUsd ?? 0,
   };
+};
+
+const formatDollarsFromCents = (cents) => {
+  const value = Number(cents ?? 0);
+  if (!Number.isFinite(value)) return "$0.00";
+  return (value / 100).toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+  });
 };
 
 export default function Customers() {
@@ -64,8 +71,7 @@ export default function Customers() {
     page,
     pageSize,
     query: initialQuery,
-    configuredPointsPerDollar,
-    hasDiscountRule,
+    centsToOneUsd,
   } = useLoaderData();
   const { id } = useParams();
 
@@ -131,16 +137,9 @@ export default function Customers() {
   return (
     <s-page heading="Customers">
       <s-stack direction="block" gap="base">
-        {!configuredPointsPerDollar ? (
+        {!(centsToOneUsd > 0) ? (
           <s-banner tone="critical">
-            You need to configure how many points customers will earn per
-            dollar spent. <s-link href="/app/settings">Go to settings.</s-link>
-          </s-banner>
-        ) : null}
-        {!hasDiscountRule ? (
-          <s-banner tone="caution">
-            You need at least one discount rule for customers to
-            spend their points.{" "}
+            You need to configure rewards earning.{" "}
             <s-link href="/app/settings">Go to settings.</s-link>
           </s-banner>
         ) : null}
@@ -164,8 +163,8 @@ export default function Customers() {
                   <s-table-header-row>
                     <s-table-header listSlot="primary">Name</s-table-header>
                     <s-table-header>Email</s-table-header>
-                    <s-table-header>Current points</s-table-header>
-                    <s-table-header>Lifetime points</s-table-header>
+                    <s-table-header>Current rewards</s-table-header>
+                    <s-table-header>Lifetime rewards</s-table-header>
                   </s-table-header-row>
                   <s-table-body>
                     {customers.length === 0 ? (
@@ -195,8 +194,12 @@ export default function Customers() {
                             </s-link>
                           </s-table-cell>
                           <s-table-cell>{customer.email}</s-table-cell>
-                          <s-table-cell>{customer.currentPoints}</s-table-cell>
-                          <s-table-cell>{customer.lifetimePoints}</s-table-cell>
+                          <s-table-cell>
+                            {formatDollarsFromCents(customer.currentRewardsCents)}
+                          </s-table-cell>
+                          <s-table-cell>
+                            {formatDollarsFromCents(customer.lifetimeRewardsCents)}
+                          </s-table-cell>
                         </s-table-row>
                       ))
                     )}

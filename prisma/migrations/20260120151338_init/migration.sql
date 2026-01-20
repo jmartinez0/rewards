@@ -27,12 +27,10 @@ CREATE TABLE "Session" (
 -- CreateTable
 CREATE TABLE "Config" (
     "id" SERIAL NOT NULL,
-    "pointsPerDollar" INTEGER NOT NULL DEFAULT 0,
-    "pointsExpirationDays" INTEGER,
+    "centsToOneUsd" INTEGER NOT NULL DEFAULT 0,
+    "expirationDays" INTEGER,
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "updatedAt" TIMESTAMP(3) NOT NULL,
-    "configuredPointsPerDollar" BOOLEAN NOT NULL DEFAULT false,
-    "configuredDiscountRule" BOOLEAN NOT NULL DEFAULT false,
 
     CONSTRAINT "Config_pkey" PRIMARY KEY ("id")
 );
@@ -43,8 +41,8 @@ CREATE TABLE "Customer" (
     "email" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "shopifyCustomerId" TEXT,
-    "currentPoints" INTEGER NOT NULL DEFAULT 0,
-    "lifetimePoints" INTEGER NOT NULL DEFAULT 0,
+    "currentRewardsCents" INTEGER NOT NULL DEFAULT 0,
+    "lifetimeRewardsCents" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -56,9 +54,9 @@ CREATE TABLE "LedgerEntry" (
     "id" SERIAL NOT NULL,
     "customerId" INTEGER NOT NULL,
     "type" "LedgerType" NOT NULL,
-    "pointsDelta" INTEGER NOT NULL,
-    "remainingPoints" INTEGER,
-    "pointsPerDollar" INTEGER,
+    "rewardsDeltaCents" INTEGER NOT NULL,
+    "remainingRewardsCents" INTEGER,
+    "centsToOneUsd" INTEGER,
     "expiresAt" TIMESTAMP(3),
     "orderId" TEXT,
     "sourceLotId" INTEGER,
@@ -69,26 +67,11 @@ CREATE TABLE "LedgerEntry" (
     CONSTRAINT "LedgerEntry_pkey" PRIMARY KEY ("id")
 );
 
--- CreateTable
-CREATE TABLE "DiscountRule" (
-    "id" SERIAL NOT NULL,
-    "points" INTEGER NOT NULL,
-    "percentOff" INTEGER NOT NULL,
-    "isActive" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "DiscountRule_pkey" PRIMARY KEY ("id")
-);
-
 -- CreateIndex
 CREATE UNIQUE INDEX "Customer_email_key" ON "Customer"("email");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Customer_shopifyCustomerId_key" ON "Customer"("shopifyCustomerId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "DiscountRule_points_key" ON "DiscountRule"("points");
 
 -- AddForeignKey
 ALTER TABLE "LedgerEntry" ADD CONSTRAINT "LedgerEntry_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE RESTRICT ON UPDATE CASCADE;

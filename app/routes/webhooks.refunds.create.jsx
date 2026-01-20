@@ -1,49 +1,19 @@
 import { authenticate, unauthenticated } from "../shopify.server";
 import db from "../db.server";
 
-const logWebhook = (...args) => {
-  console.log("[refunds/create]", ...args);
-};
-
-const logWebhookError = (...args) => {
-  console.error("[refunds/create]", ...args);
-};
+const log = (...args) => console.log("[refunds/create]", ...args);
+const error = (...args) => console.error("[refunds/create]", ...args);
 
 const parseMoneyToCents = (amount) => {
-  if (amount == null) return 0;
-
-  const normalized = String(amount).trim();
+  const normalized = String(amount ?? "").trim();
   if (!normalized) return 0;
-
   const negative = normalized.startsWith("-");
   const unsigned = negative ? normalized.slice(1) : normalized;
   const [wholePart, fracPart = ""] = unsigned.split(".");
   const whole = Number(wholePart || "0");
   const frac = Number((fracPart + "00").slice(0, 2));
   const cents = whole * 100 + frac;
-
   return negative ? -cents : cents;
-};
-
-const getNoteAttributesMap = (order) => {
-  const entries = Array.isArray(order?.customAttributes)
-    ? order.customAttributes
-    : [];
-  const map = new Map();
-  for (const entry of entries) {
-    const key = entry?.key != null ? String(entry.key) : "";
-    if (!key) continue;
-    map.set(key, entry?.value != null ? String(entry.value) : "");
-  }
-  return map;
-};
-
-const parsePositiveInt = (value) => {
-  const normalized = String(value ?? "").trim();
-  if (!/^\d+$/.test(normalized)) return null;
-  const parsed = Number.parseInt(normalized, 10);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return null;
-  return parsed;
 };
 
 const getCustomerGid = (shopifyCustomerId) => {
@@ -54,10 +24,11 @@ const getCustomerGid = (shopifyCustomerId) => {
   return match ? `gid://shopify/Customer/${match[1]}` : null;
 };
 
-const setCustomerCurrentPointsMetafield = async ({
+const setCustomerRewardsMetafields = async ({
   shopDomain,
   shopifyCustomerId,
-  currentPoints,
+  currentRewardsCents,
+  lifetimeRewardsCents,
 }) => {
   const ownerId = getCustomerGid(shopifyCustomerId);
   if (!ownerId) return;
@@ -65,12 +36,9 @@ const setCustomerCurrentPointsMetafield = async ({
   try {
     const { admin } = await unauthenticated.admin(shopDomain);
     const mutation = `
-      mutation SetCustomerPoints($metafields: [MetafieldsSetInput!]!) {
+      mutation SetCustomerRewards($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
-          userErrors {
-            field
-            message
-          }
+          userErrors { field message }
         }
       }
     `;
@@ -81,9 +49,16 @@ const setCustomerCurrentPointsMetafield = async ({
           {
             ownerId,
             namespace: "rewards",
-            key: "current_points",
+            key: "current_rewards",
             type: "number_integer",
-            value: String(currentPoints),
+            value: String(currentRewardsCents),
+          },
+          {
+            ownerId,
+            namespace: "rewards",
+            key: "lifetime_rewards",
+            type: "number_integer",
+            value: String(lifetimeRewardsCents),
           },
         ],
       },
@@ -92,25 +67,37 @@ const setCustomerCurrentPointsMetafield = async ({
     const json = await response.json();
     const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
     if (userErrors.length > 0) {
-      logWebhookError("Failed to set customer current_points metafield", {
-        ownerId,
-        userErrors,
-      });
+      error("Failed to set customer rewards metafields", { ownerId, userErrors });
     }
-  } catch (error) {
-    logWebhookError("Error setting customer current_points metafield", {
+  } catch (err) {
+    error("Error setting customer rewards metafields", {
       ownerId,
-      error: error?.message ?? String(error),
+      error: err?.message ?? String(err),
     });
   }
 };
 
-const getRefundId = (refund) => {
-  if (!refund) return null;
-  if (refund?.admin_graphql_api_id) return refund.admin_graphql_api_id;
-  if (refund?.id != null) return String(refund.id);
-  return null;
+const parsePositiveInt = (value) => {
+  const normalized = String(value ?? "").trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
 };
+
+const getNoteAttributesMap = (order) => {
+  const entries = Array.isArray(order?.customAttributes) ? order.customAttributes : [];
+  const map = new Map();
+  for (const entry of entries) {
+    const key = entry?.key != null ? String(entry.key) : "";
+    if (!key) continue;
+    map.set(key, entry?.value != null ? String(entry.value) : "");
+  }
+  return map;
+};
+
+const getRefundId = (refund) =>
+  refund?.admin_graphql_api_id ? refund.admin_graphql_api_id : refund?.id != null ? String(refund.id) : null;
 
 const getOrderNumericId = (refund) => {
   const raw =
@@ -125,9 +112,7 @@ const getOrderNumericId = (refund) => {
 };
 
 const getRefundTotalCentsFromPayload = (refund) => {
-  if (!refund) return null;
-
-  const transactions = Array.isArray(refund.transactions) ? refund.transactions : [];
+  const transactions = Array.isArray(refund?.transactions) ? refund.transactions : [];
   const refundedTransactions = transactions.filter((transaction) => {
     const kind = String(transaction?.kind ?? "").toLowerCase();
     const status = String(transaction?.status ?? "").toLowerCase();
@@ -146,9 +131,9 @@ const getRefundTotalCentsFromPayload = (refund) => {
     if (cents > 0) return cents;
   }
 
-  const refundLineItems = Array.isArray(refund.refund_line_items)
+  const refundLineItems = Array.isArray(refund?.refund_line_items)
     ? refund.refund_line_items
-    : Array.isArray(refund.refundLineItems)
+    : Array.isArray(refund?.refundLineItems)
       ? refund.refundLineItems
       : [];
 
@@ -164,11 +149,9 @@ const getRefundTotalCentsFromPayload = (refund) => {
     if (cents > 0) return cents;
   }
 
-  // Shipping-only refunds: fall back to shipping lines / adjustments when there are
-  // no refund transactions and no refund line items.
-  const refundShippingLines = Array.isArray(refund.refund_shipping_lines)
+  const refundShippingLines = Array.isArray(refund?.refund_shipping_lines)
     ? refund.refund_shipping_lines
-    : Array.isArray(refund.refundShippingLines)
+    : Array.isArray(refund?.refundShippingLines)
       ? refund.refundShippingLines
       : [];
 
@@ -184,9 +167,9 @@ const getRefundTotalCentsFromPayload = (refund) => {
     return sum + parseMoneyToCents(amount);
   }, 0);
 
-  const orderAdjustments = Array.isArray(refund.order_adjustments)
+  const orderAdjustments = Array.isArray(refund?.order_adjustments)
     ? refund.order_adjustments
-    : Array.isArray(refund.orderAdjustments)
+    : Array.isArray(refund?.orderAdjustments)
       ? refund.orderAdjustments
       : [];
 
@@ -214,39 +197,11 @@ const fetchOrderSummary = async ({ shopDomain, orderNumericId }) => {
       order(id: $id) {
         id
         email
-        originalTotalPriceSet {
-          shopMoney {
-            amount
-          }
-        }
-        totalPriceSet {
-          shopMoney {
-            amount
-          }
-        }
-        currentTotalPriceSet {
-          shopMoney {
-            amount
-          }
-        }
-        customAttributes {
-          key
-          value
-        }
-        customer {
-          id
-          email
-          firstName
-          lastName
-        }
-        billingAddress {
-          firstName
-          lastName
-        }
-        shippingAddress {
-          firstName
-          lastName
-        }
+        originalTotalPriceSet { shopMoney { amount } }
+        totalPriceSet { shopMoney { amount } }
+        currentTotalPriceSet { shopMoney { amount } }
+        customAttributes { key value }
+        customer { id email }
       }
     }
   `;
@@ -258,17 +213,10 @@ const fetchOrderSummary = async ({ shopDomain, orderNumericId }) => {
   return json?.data?.order ?? null;
 };
 
-const formatName = (firstName, lastName) => {
-  const combined = [firstName, lastName].filter(Boolean).join(" ").trim();
-  return combined ? combined.replace(/\s+/g, " ") : null;
-};
-
-const getOrderNameFromSummary = (order) => {
-  const fromCustomer = formatName(order?.customer?.firstName, order?.customer?.lastName);
-  if (fromCustomer) return fromCustomer;
-  const fromBilling = formatName(order?.billingAddress?.firstName, order?.billingAddress?.lastName);
-  if (fromBilling) return fromBilling;
-  return formatName(order?.shippingAddress?.firstName, order?.shippingAddress?.lastName);
+const computeEarnedRewardsCents = ({ totalCents, centsToOneUsd }) => {
+  if (!Number.isFinite(totalCents) || totalCents <= 0) return 0;
+  if (!Number.isFinite(centsToOneUsd) || centsToOneUsd <= 0) return 0;
+  return Math.floor((totalCents * 100) / centsToOneUsd);
 };
 
 export const action = async ({ request }) => {
@@ -276,356 +224,237 @@ export const action = async ({ request }) => {
   const startedAt = Date.now();
 
   const { payload, session, topic, shop } = await authenticate.webhook(request);
-
-  logWebhook("Received", { requestId, topic, shop, hasSession: Boolean(session) });
-
-  if (!session) {
-    logWebhook("skipping (no session)", { requestId });
-    return new Response();
-  }
+  log("Received", { requestId, topic, shop, hasSession: Boolean(session) });
+  if (!session) return new Response();
 
   const refund = payload;
   const refundId = getRefundId(refund);
   const orderNumericId = getOrderNumericId(refund);
   const refundTotalCents = getRefundTotalCentsFromPayload(refund);
+  const refundMarker = refundId ? String(refundId).match(/(\d+)$/)?.[1] ?? null : null;
+  const refundNotesSuffix = refundMarker ? ` [refund:${refundMarker}]` : "";
 
-  logWebhook("Parsed payload", {
-    requestId,
-    refundId,
-    orderNumericId,
-    refundTotalCents,
-  });
-
-  const config = await db.config.findFirst({ orderBy: { id: "asc" } });
-  if (!config?.isActive) {
-    logWebhook("skipping (rewards inactive)", { requestId });
+  if (!orderNumericId || refundTotalCents == null) {
+    log("Skipping (missing order id or refund total)", {
+      requestId,
+      refundId,
+      orderNumericId,
+      refundTotalCents,
+    });
     return new Response();
   }
 
-  if (!config?.pointsPerDollar) {
-    logWebhook("skipping (pointsPerDollar not configured)", { requestId });
-    return new Response();
-  }
-
-  if (refundTotalCents == null) {
-    logWebhook("skipping (could not determine refund total)", { requestId, refundId });
+  const config = await db.config.findUnique({ where: { id: 1 } });
+  if (!config?.isActive || !config?.centsToOneUsd) {
+    log("Skipping (inactive or not configured)", { requestId });
     return new Response();
   }
 
   const order = await fetchOrderSummary({ shopDomain: shop, orderNumericId });
-  const orderId = order?.id ?? (orderNumericId ? `gid://shopify/Order/${orderNumericId}` : null);
+  const orderId = order?.id ?? `gid://shopify/Order/${orderNumericId}`;
   const email = order?.email ?? order?.customer?.email ?? null;
   const shopifyCustomerId = order?.customer?.id ?? null;
-  const name = getOrderNameFromSummary(order) ?? email;
   const noteAttributes = getNoteAttributesMap(order);
-  const pointsSpentOnOrder = parsePositiveInt(noteAttributes.get("Points spent"));
+
+  const spendOnOrderCents = parsePositiveInt(noteAttributes.get("Rewards spent")) ?? 0;
   const orderTotalCents = parseMoneyToCents(
     order?.originalTotalPriceSet?.shopMoney?.amount ??
       order?.totalPriceSet?.shopMoney?.amount ??
       order?.currentTotalPriceSet?.shopMoney?.amount ??
       null,
   );
-  const orderNumericIdForNotes = orderNumericId ?? getOrderNumericId(refund);
-
-  if (!orderId) {
-    logWebhook("skipping (missing orderId)", { requestId, refundId });
-    return new Response();
-  }
+  const clampedRefundTotalCents =
+    orderTotalCents > 0 ? Math.min(refundTotalCents, orderTotalCents) : refundTotalCents;
+  const refundReason =
+    orderTotalCents > 0 && clampedRefundTotalCents >= orderTotalCents
+      ? `Order ${orderNumericId} was refunded`
+      : `Order ${orderNumericId} was partially refunded`;
 
   if (!email && !shopifyCustomerId) {
-    logWebhook("skipping (missing email and customer id)", { requestId, orderId });
+    log("Skipping (missing email and customer id)", { requestId, orderId });
     return new Response();
   }
 
-  let updatedCustomerForMetafield = null;
+  let updatedCustomerForMetafields = null;
 
   try {
-    updatedCustomerForMetafield = await db.$transaction(async (tx) => {
-      const refundMarker = refundId
-        ? String(refundId).match(/(\d+)$/)?.[1] ?? String(refundId)
-        : null;
-      const refundNotesSuffix = refundMarker ? ` [refund:${refundMarker}]` : "";
-
-      const existingRefundProcess = refundMarker
-        ? await tx.ledgerEntry.findFirst({
-            where: {
-              type: "ADJUST",
-              orderId,
-              notes: { contains: refundNotesSuffix },
-            },
-          })
-        : null;
-
-      if (existingRefundProcess) {
-        logWebhook("skipping (refund already processed)", {
-          requestId,
-          existingRefundAdjustId: existingRefundProcess.id,
-        });
-
-        const existingCustomer = shopifyCustomerId
-          ? await tx.customer.findFirst({
-              where: { shopifyCustomerId },
-              select: { currentPoints: true, shopifyCustomerId: true },
-            })
-          : email
-            ? await tx.customer.findUnique({
-                where: { email },
-                select: { currentPoints: true, shopifyCustomerId: true },
-              })
-            : null;
-
-        if (existingCustomer?.shopifyCustomerId == null && shopifyCustomerId && email) {
-          return await tx.customer.update({
-            where: { email },
-            data: { shopifyCustomerId },
-            select: { currentPoints: true, shopifyCustomerId: true },
-          });
-        }
-
-        return existingCustomer;
-      }
-
-      let customer = null;
-
-      if (shopifyCustomerId) {
-        customer = await tx.customer.findFirst({
-          where: { shopifyCustomerId },
-          select: {
-            id: true,
-            currentPoints: true,
-            shopifyCustomerId: true,
-          },
-        });
-      }
-
-      if (!customer && email) {
-        customer = await tx.customer.findUnique({
-          where: { email },
-          select: {
-            id: true,
-            currentPoints: true,
-            shopifyCustomerId: true,
-          },
-        });
-      }
-
-      if (!customer) {
-        logWebhook("creating customer (refund)", {
-          requestId,
-          email,
-          hasShopifyCustomerId: Boolean(shopifyCustomerId),
-          hasName: Boolean(name),
-        });
-        customer = await tx.customer.create({
-          data: {
-            email: email ?? `guest-${orderNumericId ?? "unknown"}@unknown`,
-            name: name ?? "Guest",
-            shopifyCustomerId,
-          },
-          select: {
-            id: true,
-            currentPoints: true,
-            shopifyCustomerId: true,
-          },
-        });
-      } else if (!customer.shopifyCustomerId && shopifyCustomerId) {
-        customer = await tx.customer.update({
-          where: { id: customer.id },
-          data: { shopifyCustomerId },
-          select: {
-            id: true,
-            currentPoints: true,
-            shopifyCustomerId: true,
-          },
-        });
-      } else if (shopifyCustomerId && customer.shopifyCustomerId !== shopifyCustomerId) {
-        customer = await tx.customer.update({
-          where: { id: customer.id },
-          data: { shopifyCustomerId },
-          select: {
-            id: true,
-            currentPoints: true,
-            shopifyCustomerId: true,
-          },
-        });
-      }
-
-      const earnLot = await tx.ledgerEntry.findFirst({
-        where: {
-          type: "EARN",
-          orderId,
-          customerId: customer.id,
-        },
-        select: {
-          id: true,
-          remainingPoints: true,
-          pointsPerDollar: true,
-        },
-      });
-
-      const earnLotRemaining =
-        earnLot && typeof earnLot.remainingPoints === "number"
-          ? Math.max(0, earnLot.remainingPoints)
-          : 0;
-
-      const effectivePointsPerDollar =
-        earnLot?.pointsPerDollar && earnLot.pointsPerDollar > 0
-          ? earnLot.pointsPerDollar
-          : config.pointsPerDollar;
-
-      const pointsToRemove = Math.floor((refundTotalCents * effectivePointsPerDollar) / 100);
-      // Refunds only deplete from the earn lot for this order.
-      const removablePoints = Math.min(pointsToRemove, earnLotRemaining);
-
-      let customerCurrentPoints = customer.currentPoints;
-
-      if (pointsSpentOnOrder && pointsSpentOnOrder > 0) {
-        const spentPointsRefundEstimate =
-          orderTotalCents > 0
-            ? Math.floor((pointsSpentOnOrder * refundTotalCents) / orderTotalCents)
-            : Math.min(pointsSpentOnOrder, Math.max(0, pointsToRemove));
-
-        const spentPointsRefundable = Math.max(
-          0,
-          Math.min(pointsSpentOnOrder, spentPointsRefundEstimate),
-        );
-
-        const alreadyRefundedSpentPointsResult = await tx.ledgerEntry.aggregate({
+    updatedCustomerForMetafields = await db.$transaction(async (tx) => {
+      if (refundNotesSuffix) {
+        const existingRefund = await tx.ledgerEntry.findFirst({
           where: {
-            type: "ADJUST",
             orderId,
-            pointsDelta: { gt: 0 },
-            notes: { startsWith: "Refunded points from order " },
+            type: "ADJUST",
+            notes: { contains: refundNotesSuffix },
           },
-          _sum: { pointsDelta: true },
+          select: { id: true },
         });
 
-        const alreadyRefundedSpentPoints = Math.max(
-          0,
-          alreadyRefundedSpentPointsResult?._sum?.pointsDelta ?? 0,
-        );
-
-        const remainingRefundableSpentPoints = Math.max(
-          0,
-          pointsSpentOnOrder - alreadyRefundedSpentPoints,
-        );
-
-        const pointsToRefund = Math.min(
-          remainingRefundableSpentPoints,
-          spentPointsRefundable,
-        );
-
-        if (pointsToRefund > 0) {
-          logWebhook("Refunding spent points", {
+        if (existingRefund) {
+          log("Skipping (refund already processed)", {
             requestId,
             orderId,
             refundId,
-            pointsSpentOnOrder,
-            orderTotalCents,
-            refundTotalCents,
-            spentPointsRefundEstimate,
-            alreadyRefundedSpentPoints,
-            pointsToRefund,
+            existingAdjustId: existingRefund.id,
           });
-
-          const now = new Date();
-          const refundExpiresAt = config.pointsExpirationDays
-            ? new Date(
-                now.getTime() + config.pointsExpirationDays * 24 * 60 * 60 * 1000,
-              )
-            : null;
-
-          await tx.ledgerEntry.create({
-            data: {
-              customerId: customer.id,
-              type: "ADJUST",
-              pointsDelta: pointsToRefund,
-              remainingPoints: pointsToRefund,
-              expiresAt: refundExpiresAt,
-              notes: `Refunded points from order ${orderNumericIdForNotes ?? orderId}${refundNotesSuffix}`,
-              orderId,
+          return await tx.customer.findUnique({
+            where: { email },
+            select: {
+              currentRewardsCents: true,
+              lifetimeRewardsCents: true,
+              shopifyCustomerId: true,
             },
           });
-
-          customerCurrentPoints += pointsToRefund;
         }
       }
 
-      if (pointsToRemove <= 0 || removablePoints <= 0) {
-        logWebhook("skipping (no refundable points remaining in earn lot)", {
-          requestId,
-          refundTotalCents,
-          effectivePointsPerDollar,
-          pointsToRemove,
-          earnLotRemaining,
-          removablePoints,
-          pointsSpentOnOrder,
-        });
-      } else {
-        logWebhook("Creating refund adjust ledger entry", {
-          requestId,
-          customerId: customer.id,
+      const customer = shopifyCustomerId
+        ? await tx.customer.findFirst({
+            where: { shopifyCustomerId },
+            select: { id: true, currentRewardsCents: true, lifetimeRewardsCents: true, shopifyCustomerId: true },
+        })
+        : email
+          ? await tx.customer.findUnique({
+            where: { email },
+            select: { id: true, currentRewardsCents: true, lifetimeRewardsCents: true, shopifyCustomerId: true },
+          })
+          : null;
+
+      if (!customer) {
+        log("Skipping (no customer in db)", { requestId, orderId, hasEmail: Boolean(email) });
+        return null;
+      }
+
+      const earnLot = await tx.ledgerEntry.findFirst({
+        where: { type: "EARN", orderId },
+        select: { id: true, remainingRewardsCents: true, centsToOneUsd: true },
+      });
+
+      const earnLotRemaining = Math.max(0, earnLot?.remainingRewardsCents ?? 0);
+      const effectiveCentsToOneUsd =
+        earnLot?.centsToOneUsd && earnLot.centsToOneUsd > 0
+          ? earnLot.centsToOneUsd
+          : config.centsToOneUsd;
+
+      const earnedToRemoveCents = computeEarnedRewardsCents({
+        totalCents: clampedRefundTotalCents,
+        centsToOneUsd: effectiveCentsToOneUsd,
+      });
+      const removableEarnedCents = Math.min(earnLotRemaining, earnedToRemoveCents);
+
+      const spentRefundEstimateCents =
+        orderTotalCents > 0
+          ? Math.floor((spendOnOrderCents * clampedRefundTotalCents) / orderTotalCents)
+          : spendOnOrderCents;
+
+      const alreadyRefundedSpentResult = await tx.ledgerEntry.aggregate({
+        where: {
+          type: "ADJUST",
           orderId,
-          refundId,
-          pointsDelta: -removablePoints,
-          pointsPerDollar: effectivePointsPerDollar,
-          pointsSpentOnOrder,
+          rewardsDeltaCents: { gt: 0 },
+          notes: { startsWith: "Rewards refund from order " },
+        },
+        _sum: { rewardsDeltaCents: true },
+      });
+
+      const alreadyRefundedSpentCents = Math.max(
+        0,
+        alreadyRefundedSpentResult?._sum?.rewardsDeltaCents ?? 0,
+      );
+
+      const remainingRefundableSpentCents = Math.max(
+        0,
+        Math.min(spendOnOrderCents, spentRefundEstimateCents) - alreadyRefundedSpentCents,
+      );
+
+      const now = new Date();
+      const refundExpiresAt = config.expirationDays
+        ? new Date(now.getTime() + config.expirationDays * 24 * 60 * 60 * 1000)
+        : null;
+
+      let currentRewardsCents = customer.currentRewardsCents;
+
+      if (remainingRefundableSpentCents > 0) {
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: customer.id,
+            type: "ADJUST",
+            rewardsDeltaCents: remainingRefundableSpentCents,
+            remainingRewardsCents: remainingRefundableSpentCents,
+            expiresAt: refundExpiresAt,
+            notes: `${refundReason}${refundNotesSuffix}`,
+            orderId,
+          },
         });
 
+        currentRewardsCents += remainingRefundableSpentCents;
+      }
+
+      if (removableEarnedCents > 0 && earnLot?.id) {
         await tx.ledgerEntry.update({
           where: { id: earnLot.id },
-          data: { remainingPoints: Math.max(0, earnLotRemaining - removablePoints) },
+          data: { remainingRewardsCents: Math.max(0, earnLotRemaining - removableEarnedCents) },
         });
 
         await tx.ledgerEntry.create({
           data: {
             customerId: customer.id,
             type: "ADJUST",
-            pointsDelta: -removablePoints,
-            pointsPerDollar: effectivePointsPerDollar,
-            notes: `Refund from order ${orderNumericIdForNotes ?? orderId}${refundNotesSuffix}`,
+            rewardsDeltaCents: -removableEarnedCents,
+            centsToOneUsd: effectiveCentsToOneUsd,
+            notes: `${refundReason}${refundNotesSuffix}`,
             orderId,
-            sourceLotId: earnLot?.id ?? null,
+            sourceLotId: earnLot.id,
           },
         });
 
-        const decrement = Math.min(removablePoints, customerCurrentPoints);
-        customerCurrentPoints = Math.max(0, customerCurrentPoints - decrement);
+        currentRewardsCents = Math.max(0, currentRewardsCents - removableEarnedCents);
       }
 
       const updatedCustomer = await tx.customer.update({
         where: { id: customer.id },
-        data: {
-          currentPoints: customerCurrentPoints,
-        },
+        data: { currentRewardsCents },
         select: {
-          currentPoints: true,
+          currentRewardsCents: true,
+          lifetimeRewardsCents: true,
           shopifyCustomerId: true,
         },
       });
 
+      log("Processed", {
+        requestId,
+        orderId,
+        refundId,
+        refundTotalCents: clampedRefundTotalCents,
+        rawRefundTotalCents: refundTotalCents,
+        spendOnOrderCents,
+        spentRefundEstimateCents,
+        refundedSpentCents: remainingRefundableSpentCents,
+        earnedToRemoveCents,
+        removedEarnedCents: removableEarnedCents,
+      });
+
       return updatedCustomer;
     });
-  } catch (error) {
-    logWebhookError("transaction failed", {
+  } catch (err) {
+    error("Transaction failed", {
       requestId,
-      orderId,
+      orderNumericId,
       refundId,
       elapsedMs: Date.now() - startedAt,
-      error: error?.message ?? String(error),
+      error: err?.message ?? String(err),
     });
-    throw error;
+    throw err;
   }
 
-  logWebhook("Done", { requestId, elapsedMs: Date.now() - startedAt });
-
-  if (updatedCustomerForMetafield) {
-    await setCustomerCurrentPointsMetafield({
+  if (updatedCustomerForMetafields) {
+    await setCustomerRewardsMetafields({
       shopDomain: shop,
-      shopifyCustomerId: updatedCustomerForMetafield.shopifyCustomerId,
-      currentPoints: updatedCustomerForMetafield.currentPoints,
+      shopifyCustomerId: updatedCustomerForMetafields.shopifyCustomerId ?? shopifyCustomerId,
+      currentRewardsCents: updatedCustomerForMetafields.currentRewardsCents,
+      lifetimeRewardsCents: updatedCustomerForMetafields.lifetimeRewardsCents,
     });
   }
 
+  log("Done", { requestId, elapsedMs: Date.now() - startedAt });
   return new Response();
 };
