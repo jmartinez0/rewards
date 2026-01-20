@@ -3,10 +3,10 @@ import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 
 export default async function Extension() {
-  render(<AccountPoints />, document.body);
+  render(<AccountRewards />, document.body);
 }
 
-function AccountPoints() {
+function AccountRewards() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [rewards, setRewards] = useState(null);
@@ -15,14 +15,14 @@ function AccountPoints() {
     let cancelled = false;
 
     async function loadRewards() {
-      console.log('[AccountPoints] loadRewards start');
+      console.log('[AccountRewards] loadRewards start');
 
       try {
         const rawSettings = shopify?.settings?.current;
-        console.log('[AccountPoints] settings.current', rawSettings);
+        console.log('[AccountRewards] settings.current', rawSettings);
 
         const domain = String(rawSettings?.shop_domain ?? '').trim();
-        console.log('[AccountPoints] resolved domain', {
+        console.log('[AccountRewards] resolved domain', {
           domain,
           hasDomain: Boolean(domain),
         });
@@ -31,7 +31,6 @@ function AccountPoints() {
           throw new Error('Missing shop domain setting');
         }
 
-        // 1) Get customer id from the Customer Account GraphQL API
         const customerQuery = {
           query: `
             query GetCustomerId {
@@ -43,7 +42,7 @@ function AccountPoints() {
         };
 
         console.log(
-          '[AccountPoints] fetching customer id via Customer Account API',
+          '[AccountRewards] fetching customer id via Customer Account API',
           {
             endpoint: 'shopify:customer-account/api/unstable/graphql.json',
             query: customerQuery,
@@ -61,7 +60,7 @@ function AccountPoints() {
             },
           );
         } catch (fetchErr) {
-          console.log('[AccountPoints] Customer API fetch() threw', {
+          console.log('[AccountRewards] Customer API fetch() threw', {
             fetchErr,
             name: fetchErr?.name,
             message: fetchErr?.message,
@@ -70,7 +69,7 @@ function AccountPoints() {
           throw fetchErr;
         }
 
-        console.log('[AccountPoints] Customer API fetch completed', {
+        console.log('[AccountRewards] Customer API fetch completed', {
           ok: customerResp.ok,
           status: customerResp.status,
           statusText: customerResp.statusText,
@@ -78,7 +77,7 @@ function AccountPoints() {
 
         if (!customerResp.ok) {
           const text = await customerResp.text().catch(() => null);
-          console.log('[AccountPoints] customer API non-OK response', {
+          console.log('[AccountRewards] customer API non-OK response', {
             status: customerResp.status,
             statusText: customerResp.statusText,
             body: text,
@@ -89,18 +88,17 @@ function AccountPoints() {
         }
 
         const customerJson = await customerResp.json();
-        console.log('[AccountPoints] customer API JSON', customerJson);
+        console.log('[AccountRewards] customer API JSON', customerJson);
 
         const customerId = customerJson?.data?.customer?.id;
         console.log(
-          '[AccountPoints] customer.id from Customer Account API',
+          '[AccountRewards] customer.id from Customer Account API',
           customerId,
         );
 
-        // In editor or weird context: no customer -> just bail quietly
         if (!customerId) {
           console.log(
-            '[AccountPoints] No customer id – likely editor/preview, rendering nothing',
+            '[AccountRewards] No customer id – likely editor/preview, rendering nothing',
           );
           if (!cancelled) {
             setRewards(null);
@@ -109,13 +107,12 @@ function AccountPoints() {
           return;
         }
 
-        // 2) Call your app proxy with customer_id
         const base = `https://${domain}`.replace(/\/+$/, '');
-        const url = `${base}/apps/rewards/current-points?customer_id=${encodeURIComponent(
+        const url = `${base}/apps/rewards/current-rewards?customer_id=${encodeURIComponent(
           customerId,
         )}`;
 
-        console.log('[AccountPoints] about to fetch rewards', { url });
+        console.log('[AccountRewards] about to fetch rewards', { url });
 
         let response;
         try {
@@ -126,7 +123,7 @@ function AccountPoints() {
             },
           });
         } catch (fetchErr) {
-          console.log('[AccountPoints] rewards fetch() threw', {
+          console.log('[AccountRewards] rewards fetch() threw', {
             url,
             fetchErr,
             name: fetchErr?.name,
@@ -136,7 +133,7 @@ function AccountPoints() {
           throw fetchErr;
         }
 
-        console.log('[AccountPoints] rewards fetch completed', {
+        console.log('[AccountRewards] rewards fetch completed', {
           ok: response.ok,
           status: response.status,
           statusText: response.statusText,
@@ -148,12 +145,12 @@ function AccountPoints() {
             text = await response.text();
           } catch (bodyErr) {
             console.log(
-              '[AccountPoints] error reading rewards error response body',
+              '[AccountRewards] error reading rewards error response body',
               bodyErr,
             );
           }
 
-          console.log('[AccountPoints] Rewards API non-OK response', {
+          console.log('[AccountRewards] Rewards API non-OK response', {
             url,
             status: response.status,
             statusText: response.statusText,
@@ -161,7 +158,7 @@ function AccountPoints() {
           });
 
           throw new Error(
-            `Failed to load rewards points (status ${response.status})`,
+            `Failed to load rewards (status ${response.status})`,
           );
         }
 
@@ -170,19 +167,19 @@ function AccountPoints() {
           data = await response.json();
         } catch (jsonErr) {
           console.log(
-            '[AccountPoints] error parsing rewards JSON response',
+            '[AccountRewards] error parsing rewards JSON response',
             jsonErr,
           );
           throw new Error('Failed to parse rewards API response as JSON');
         }
 
-        console.log('[AccountPoints] parsed rewards data', data);
+        console.log('[AccountRewards] parsed rewards data', data);
 
         if (!cancelled) {
           setRewards(data);
         }
       } catch (err) {
-        console.log('[AccountPoints] Rewards API error (catch)', {
+        console.log('[AccountRewards] Rewards API error (catch)', {
           err,
           name: err?.name,
           message: err?.message,
@@ -199,7 +196,6 @@ function AccountPoints() {
             try {
               message = JSON.stringify(err);
             } catch {
-              // ignore
             }
           }
 
@@ -207,7 +203,7 @@ function AccountPoints() {
         }
       } finally {
         if (!cancelled) {
-          console.log('[AccountPoints] loadRewards finished');
+          console.log('[AccountRewards] loadRewards finished');
           setLoading(false);
         }
       }
@@ -216,7 +212,7 @@ function AccountPoints() {
     void loadRewards();
 
     return () => {
-      console.log('[AccountPoints] cleanup, cancelling loadRewards');
+      console.log('[AccountRewards] cleanup, cancelling loadRewards');
       cancelled = true;
     };
   }, []);
@@ -224,7 +220,7 @@ function AccountPoints() {
   if (loading) {
     return (
       <s-section>
-        <s-text>Loading your rewards points…</s-text>
+        <s-text>Loading your rewards…</s-text>
       </s-section>
     );
   }
@@ -232,7 +228,7 @@ function AccountPoints() {
   if (error) {
     return (
       <s-section>
-        <s-text>There was a problem loading your rewards points.</s-text>
+        <s-text>There was a problem loading your rewards.</s-text>
         <s-text>Debug info: {String(error)}</s-text>
       </s-section>
     );
@@ -247,9 +243,20 @@ function AccountPoints() {
       <s-stack direction="block" gap="base">
         <s-heading>Rewards</s-heading>
         <s-text>
-          Your current points balance: {rewards.currentPoints ?? 0}
+          Your rewards balance: {formatMoney(rewards.currentRewardsCents ?? 0)}
         </s-text>
       </s-stack>
     </s-section>
   );
+}
+
+function formatMoney(valueCents) {
+  const cents =
+    typeof valueCents === 'number' && Number.isFinite(valueCents)
+      ? valueCents
+      : 0;
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+  }).format(cents / 100);
 }

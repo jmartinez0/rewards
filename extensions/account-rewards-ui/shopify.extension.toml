@@ -1,13 +1,13 @@
 api_version = "2025-10"
 
 [[extensions]]
-name = "account-points-ui"
-handle = "account-points-ui"
+name = "account-rewards-ui"
+handle = "account-rewards-ui"
 type = "ui_extension"
 uid = "8fa9bee2-622a-ba75-5b2d-6663d570694f1e687291"
 
 [[extensions.targeting]]
-module = "./src/AccountPoints.jsx"
+module = "./src/AccountRewards.jsx"
 target = "customer-account.profile.block.render"
 
 [extensions.capabilities]

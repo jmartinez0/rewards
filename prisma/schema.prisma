@@ -28,52 +28,41 @@ model Session {
 }
 
 model Config {
-  id                        Int      @id @default(autoincrement())
-  pointsPerDollar           Int      @default(0)
-  pointsExpirationDays      Int?
-  isActive                  Boolean  @default(true)
-  updatedAt                 DateTime @updatedAt
-  configuredPointsPerDollar Boolean  @default(false)
-  configuredDiscountRule    Boolean  @default(false)
+  id             Int      @id @default(autoincrement())
+  centsToOneUsd  Int      @default(0)
+  expirationDays Int?
+  isActive       Boolean  @default(true)
+  updatedAt      DateTime @updatedAt
 }
 
 model Customer {
-  id                Int           @id @default(autoincrement())
-  email             String        @unique
-  name              String
-  shopifyCustomerId String?       @unique
-  currentPoints     Int           @default(0)
-  lifetimePoints    Int           @default(0)
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
-  ledgerEntries     LedgerEntry[]
+  id                   Int           @id @default(autoincrement())
+  email                String        @unique
+  name                 String
+  shopifyCustomerId    String?       @unique
+  currentRewardsCents  Int           @default(0)
+  lifetimeRewardsCents Int           @default(0)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  ledgerEntries        LedgerEntry[]
 }
 
 model LedgerEntry {
-  id                Int           @id @default(autoincrement())
-  customerId        Int
-  type              LedgerType
-  pointsDelta       Int
-  remainingPoints   Int?
-  pointsPerDollar   Int?
-  expiresAt         DateTime?
-  orderId           String?
-  sourceLotId       Int?
-  adjustmentGroupId String?       @db.Uuid
-  notes             String?
-  createdAt         DateTime      @default(now())
-  customer          Customer      @relation(fields: [customerId], references: [id])
-  sourceLot         LedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
-  depletions        LedgerEntry[] @relation("RelatedEarn")
-}
-
-model DiscountRule {
-  id         Int      @id @default(autoincrement())
-  points     Int      @unique
-  percentOff Int
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id                    Int           @id @default(autoincrement())
+  customerId            Int
+  type                  LedgerType
+  rewardsDeltaCents     Int
+  remainingRewardsCents Int?
+  centsToOneUsd         Int?
+  expiresAt             DateTime?
+  orderId               String?
+  sourceLotId           Int?
+  adjustmentGroupId     String?       @db.Uuid
+  notes                 String?
+  createdAt             DateTime      @default(now())
+  customer              Customer      @relation(fields: [customerId], references: [id])
+  sourceLot             LedgerEntry?  @relation("RelatedEarn", fields: [sourceLotId], references: [id])
+  depletions            LedgerEntry[] @relation("RelatedEarn")
 }
 
 enum LedgerType {
