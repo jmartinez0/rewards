@@ -167,7 +167,7 @@ export async function action({ request }) {
       usageLimit: 1,
       combinesWith: {
         orderDiscounts: false,
-        productDiscounts: false,
+        productDiscounts: true,
         shippingDiscounts: false,
       },
       context: {
