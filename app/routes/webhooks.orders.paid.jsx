@@ -16,45 +16,6 @@ const parseMoneyToCents = (amount) => {
   return negative ? -cents : cents;
 };
 
-const getNoteAttributesMap = (order) => {
-  const entries = Array.isArray(order?.note_attributes) ? order.note_attributes : [];
-  const map = new Map();
-  for (const entry of entries) {
-    const name = entry?.name != null ? String(entry.name) : "";
-    if (!name) continue;
-    map.set(name, entry?.value != null ? String(entry.value) : "");
-  }
-  return map;
-};
-
-const getDiscountAmountCentsForCode = (order, code) => {
-  if (!code) return 0;
-  const codes = Array.isArray(order?.discount_codes) ? order.discount_codes : [];
-  const normalizedTarget = String(code).trim().toLowerCase();
-  if (!normalizedTarget) return 0;
-
-  let total = 0;
-  for (const discount of codes) {
-    const discountCode = String(discount?.code ?? "").trim().toLowerCase();
-    if (!discountCode || discountCode !== normalizedTarget) continue;
-    total += parseMoneyToCents(discount?.amount ?? "0");
-  }
-
-  if (total > 0) return total;
-
-  const fallback =
-    order?.total_discounts_set?.shop_money?.amount ?? order?.total_discounts;
-  return parseMoneyToCents(fallback ?? "0");
-};
-
-const parsePositiveInt = (value) => {
-  const normalized = String(value ?? "").trim();
-  if (!/^\d+$/.test(normalized)) return null;
-  const parsed = Number.parseInt(normalized, 10);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return null;
-  return parsed;
-};
-
 const getCustomerGid = (shopifyCustomerId) => {
   if (!shopifyCustomerId) return null;
   const raw = String(shopifyCustomerId);
@@ -108,46 +69,84 @@ const setCustomerRewardsMetafields = async ({
     if (userErrors.length > 0) {
       error("Failed to set customer rewards metafields", { ownerId, userErrors });
     }
-  } catch (error) {
+  } catch (err) {
     error("Error setting customer rewards metafields", {
       ownerId,
-      error: error?.message ?? String(error),
+      error: err?.message ?? String(err),
     });
   }
 };
 
-const deleteDiscountCodeByCode = async ({ shopDomain, code }) => {
-  if (!code) return;
+const setCustomerPendingRewardsMetafield = async ({
+  shopDomain,
+  shopifyCustomerId,
+  pendingRewardsCents,
+}) => {
+  const ownerId = getCustomerGid(shopifyCustomerId);
+  if (!ownerId) return;
 
   try {
     const { admin } = await unauthenticated.admin(shopDomain);
-    const lookupQuery = `
-      query CodeDiscountNodeByCode($code: String!) {
-        codeDiscountNodeByCode(code: $code) { id }
-      }
-    `;
-    const lookupRes = await admin.graphql(lookupQuery, { variables: { code } });
-    const lookupJson = await lookupRes.json();
-    const nodeId = lookupJson?.data?.codeDiscountNodeByCode?.id ?? null;
-    if (!nodeId) return;
-
-    const deleteMutation = `
-      mutation DiscountCodeDelete($id: ID!) {
-        discountCodeDelete(id: $id) {
-          deletedCodeDiscountId
+    const mutation = `
+      mutation SetPendingRewards($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
           userErrors { field message }
         }
       }
     `;
 
-    const deleteRes = await admin.graphql(deleteMutation, { variables: { id: nodeId } });
-    const deleteJson = await deleteRes.json();
-    const userErrors = deleteJson?.data?.discountCodeDelete?.userErrors ?? [];
+    const response = await admin.graphql(mutation, {
+      variables: {
+        metafields: [
+          {
+            ownerId,
+            namespace: "rewards",
+            key: "pending_rewards",
+            type: "number_integer",
+            value: String(pendingRewardsCents),
+          },
+        ],
+      },
+    });
+
+    const json = await response.json();
+    const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
     if (userErrors.length > 0) {
-      error("Failed to delete discount code", { code, userErrors });
+      error("Failed to set pending rewards metafield", { ownerId, userErrors });
     }
-  } catch (error) {
-    error("Error deleting discount code", { code, error: error?.message ?? String(error) });
+  } catch (err) {
+    error("Error setting pending rewards metafield", {
+      ownerId,
+      error: err?.message ?? String(err),
+    });
+  }
+};
+
+const deleteAutomaticDiscountById = async ({ shopDomain, automaticDiscountNodeId }) => {
+  if (!automaticDiscountNodeId) return;
+
+  try {
+    const { admin } = await unauthenticated.admin(shopDomain);
+    const deleteMutation = `
+      mutation DiscountAutomaticDelete($id: ID!) {
+        discountAutomaticDelete(id: $id) {
+          deletedAutomaticDiscountId
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const deleteRes = await admin.graphql(deleteMutation, { variables: { id: automaticDiscountNodeId } });
+    const deleteJson = await deleteRes.json();
+    const userErrors = deleteJson?.data?.discountAutomaticDelete?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      error("Failed to delete automatic discount", { automaticDiscountNodeId, userErrors });
+    }
+  } catch (err) {
+    error("Error deleting automatic discount", {
+      automaticDiscountNodeId,
+      error: err?.message ?? String(err),
+    });
   }
 };
 
@@ -214,18 +213,8 @@ export const action = async ({ request }) => {
     return new Response();
   }
 
-  const noteAttributes = getNoteAttributesMap(order);
-  const spendRequestedCents = parsePositiveInt(noteAttributes.get("Rewards spent"));
-  const discountCode = noteAttributes.get("Rewards discount code") || null;
-
   const amount = order?.total_price_set?.shop_money?.amount ?? order?.total_price ?? "0";
   const orderTotalCents = parseMoneyToCents(amount);
-  const spendAppliedCents = spendRequestedCents
-    ? Math.min(
-        spendRequestedCents,
-        Math.max(0, getDiscountAmountCentsForCode(order, discountCode)),
-      ) || spendRequestedCents
-    : null;
 
   const earnedRewardsCents =
     config.centsToOneUsd > 0
@@ -240,7 +229,7 @@ export const action = async ({ request }) => {
     ? new Date(earnedAt.getTime() + config.expirationDays * 24 * 60 * 60 * 1000)
     : null;
 
-  let shouldDeleteDiscountCode = false;
+  let discountCleanup = null;
   let updatedCustomerForMetafields = null;
 
   try {
@@ -265,91 +254,6 @@ export const action = async ({ request }) => {
           where: { id: customer.id },
           data: { name },
         });
-      }
-
-      if (spendAppliedCents) {
-        const existingSpend = await tx.ledgerEntry.findFirst({
-          where: { type: "SPEND", orderId },
-          select: { id: true },
-        });
-
-        if (existingSpend) {
-          shouldDeleteDiscountCode = Boolean(discountCode);
-        } else {
-          const availableRewardsCents = Math.max(0, customer.currentRewardsCents);
-          if (spendAppliedCents > availableRewardsCents) {
-            log("Skipping spend (insufficient balance)", {
-              requestId,
-              customerId: customer.id,
-              orderId,
-              spendRequestedCents: spendAppliedCents,
-              availableRewardsCents,
-            });
-          } else {
-            const now = new Date();
-            const lots = await tx.ledgerEntry.findMany({
-              where: {
-                customerId: customer.id,
-                remainingRewardsCents: { gt: 0 },
-                AND: [
-                  {
-                    OR: [
-                      { type: "EARN" },
-                      { type: "ADJUST", rewardsDeltaCents: { gt: 0 } },
-                    ],
-                  },
-                  { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-                ],
-              },
-              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-              select: { id: true, remainingRewardsCents: true },
-            });
-
-            let remainingToSpend = spendAppliedCents;
-
-            for (const lot of lots) {
-              if (remainingToSpend <= 0) break;
-              const available = Math.max(0, lot.remainingRewardsCents ?? 0);
-              if (!available) continue;
-
-              const take = Math.min(available, remainingToSpend);
-              remainingToSpend -= take;
-
-              await tx.ledgerEntry.update({
-                where: { id: lot.id },
-                data: { remainingRewardsCents: Math.max(0, available - take) },
-              });
-
-              await tx.ledgerEntry.create({
-                data: {
-                  customerId: customer.id,
-                  type: "SPEND",
-                  rewardsDeltaCents: -take,
-                  sourceLotId: lot.id,
-                  orderId,
-                  notes: discountCode ? `Spend (code ${discountCode})` : "Spend",
-                },
-              });
-            }
-
-            if (remainingToSpend > 0) {
-              error("Spend allocation did not cover request", {
-                requestId,
-                customerId: customer.id,
-                orderId,
-                spendRequestedCents: spendAppliedCents,
-                remainingToSpend,
-              });
-            }
-
-            customer = await tx.customer.update({
-              where: { id: customer.id },
-              data: { currentRewardsCents: { decrement: spendAppliedCents } },
-            });
-
-            shouldDeleteDiscountCode = Boolean(discountCode);
-          }
-        }
       }
 
       const existingEarn = await tx.ledgerEntry.findFirst({
@@ -379,25 +283,32 @@ export const action = async ({ request }) => {
         });
       }
 
+      if (customer.shopifyCustomerId) {
+        const existingDiscount = await tx.discount.findUnique({
+          where: { shopifyCustomerId: customer.shopifyCustomerId },
+          select: { id: true, automaticDiscountNodeId: true },
+        });
+
+        if (existingDiscount) {
+          discountCleanup = existingDiscount;
+        }
+      }
+
       return {
         currentRewardsCents: customer.currentRewardsCents,
         lifetimeRewardsCents: customer.lifetimeRewardsCents,
         shopifyCustomerId: customer.shopifyCustomerId,
       };
     });
-  } catch (error) {
+  } catch (err) {
     error("Transaction failed", {
       requestId,
       orderId,
       email,
       elapsedMs: Date.now() - startedAt,
-      error: error?.message ?? String(error),
+      error: err?.message ?? String(err),
     });
-    throw error;
-  }
-
-  if (shouldDeleteDiscountCode && discountCode) {
-    await deleteDiscountCodeByCode({ shopDomain: shop, code: discountCode });
+    throw err;
   }
 
   if (updatedCustomerForMetafields) {
@@ -407,6 +318,22 @@ export const action = async ({ request }) => {
       currentRewardsCents: updatedCustomerForMetafields.currentRewardsCents,
       lifetimeRewardsCents: updatedCustomerForMetafields.lifetimeRewardsCents,
     });
+  }
+
+  if (shopifyCustomerId) {
+    await setCustomerPendingRewardsMetafield({
+      shopDomain: shop,
+      shopifyCustomerId,
+      pendingRewardsCents: 0,
+    });
+  }
+
+  if (discountCleanup?.automaticDiscountNodeId) {
+    await deleteAutomaticDiscountById({
+      shopDomain: shop,
+      automaticDiscountNodeId: discountCleanup.automaticDiscountNodeId,
+    });
+    await db.discount.delete({ where: { id: discountCleanup.id } });
   }
 
   log("Done", { requestId, elapsedMs: Date.now() - startedAt });

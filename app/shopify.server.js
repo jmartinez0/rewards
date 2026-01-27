@@ -57,6 +57,13 @@ const shopify = shopifyApp({
           type: "number_integer",
           ownerType: "CUSTOMER",
         },
+        {
+          name: "Rewards pending rewards (cents)",
+          namespace: "rewards",
+          key: "pending_rewards",
+          type: "number_integer",
+          ownerType: "CUSTOMER",
+        },
       ];
 
       const metafieldDefinitionCreate = `

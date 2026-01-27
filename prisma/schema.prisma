@@ -65,6 +65,14 @@ model LedgerEntry {
   depletions            LedgerEntry[] @relation("RelatedEarn")
 }
 
+model Discount {
+  id                      Int      @id @default(autoincrement())
+  shopifyCustomerId       String   @unique
+  automaticDiscountNodeId String
+  discountTitle           String
+  createdAt               DateTime @default(now())
+}
+
 enum LedgerType {
   EARN
   SPEND

@@ -17,16 +17,6 @@ export async function loader() {
   });
 }
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...NOINDEX_HEADERS,
-    },
-  });
-}
-
 function textResponse(text, status) {
   return new Response(text, {
     status,
@@ -39,9 +29,88 @@ function toCustomerGid(numericId) {
   return `gid://shopify/Customer/${id}`;
 }
 
+const setCustomerPendingRewardsMetafield = async ({
+  shopDomain,
+  shopifyCustomerId,
+  pendingRewardsCents,
+}) => {
+  if (!shopifyCustomerId) return;
+  try {
+    const { admin } = await unauthenticated.admin(shopDomain);
+    const mutation = `
+      mutation SetPendingRewards($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const response = await admin.graphql(mutation, {
+      variables: {
+        metafields: [
+          {
+            ownerId: shopifyCustomerId,
+            namespace: "rewards",
+            key: "pending_rewards",
+            type: "number_integer",
+            value: String(pendingRewardsCents),
+          },
+        ],
+      },
+    });
+
+    const json = await response.json();
+    const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      log("Failed to set pending rewards metafield", {
+        shopDomain,
+        shopifyCustomerId,
+        userErrors,
+      });
+    }
+  } catch (err) {
+    log("Error setting pending rewards metafield", {
+      shopDomain,
+      shopifyCustomerId,
+      error: err?.message ?? String(err),
+    });
+  }
+};
+
 const formatCentsToDollars = (cents) => {
   const amount = typeof cents === "number" && Number.isFinite(cents) ? cents : 0;
   return (amount / 100).toFixed(2);
+};
+
+const deleteAutomaticDiscountById = async ({ shopDomain, automaticDiscountNodeId }) => {
+  if (!automaticDiscountNodeId) return;
+  try {
+    const { admin } = await unauthenticated.admin(shopDomain);
+    const mutation = `
+      mutation DiscountAutomaticDelete($id: ID!) {
+        discountAutomaticDelete(id: $id) {
+          deletedAutomaticDiscountId
+          userErrors { field message }
+        }
+      }
+    `;
+    const res = await admin.graphql(mutation, { variables: { id: automaticDiscountNodeId } });
+    const json = await res.json();
+    const userErrors = json?.data?.discountAutomaticDelete?.userErrors ?? [];
+    if (userErrors.length > 0) {
+      log("Failed to delete existing automatic discount", {
+        shopDomain,
+        automaticDiscountNodeId,
+        userErrors,
+      });
+    }
+  } catch (err) {
+    log("Error deleting existing automatic discount", {
+      shopDomain,
+      automaticDiscountNodeId,
+      error: err?.message ?? String(err),
+    });
+  }
 };
 
 export async function action({ request }) {
@@ -128,43 +197,52 @@ export async function action({ request }) {
       return textResponse("Invalid rewards amount", 400);
     }
 
+    const existing = await db.discount.findUnique({
+      where: { shopifyCustomerId },
+      select: { id: true, automaticDiscountNodeId: true },
+    });
+
+    if (existing?.automaticDiscountNodeId) {
+      await deleteAutomaticDiscountById({
+        shopDomain: shop,
+        automaticDiscountNodeId: existing.automaticDiscountNodeId,
+      });
+      await db.discount.delete({ where: { id: existing.id } });
+    }
+
     const { admin } = await unauthenticated.admin(shop);
 
     const mutation = `
-      mutation CreateRewardsAmountDiscount(
-        $basicCodeDiscount: DiscountCodeBasicInput!
+      mutation CreateRewardsAutomaticDiscount(
+        $automaticBasicDiscount: DiscountAutomaticBasicInput!
       ) {
-        discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-          codeDiscountNode {
-            codeDiscount {
-              ... on DiscountCodeBasic {
-                codes(first: 1) {
-                  nodes {
-                    code
-                  }
-                }
+        discountAutomaticBasicCreate(automaticBasicDiscount: $automaticBasicDiscount) {
+          automaticDiscountNode {
+            id
+            automaticDiscount {
+              __typename
+              ... on DiscountAutomaticBasic {
+                title
+                startsAt
               }
             }
           }
           userErrors {
             field
             message
-            code
           }
         }
       }
     `;
 
-    const uniqueCode = `REWARDS-${crypto
+    const uniqueTitle = `REWARDS-${crypto
       .randomBytes(4)
       .toString("hex")
       .toUpperCase()}`;
 
-    const basicCodeDiscount = {
-      title: uniqueCode,
-      code: uniqueCode,
+    const automaticBasicDiscount = {
+      title: uniqueTitle,
       startsAt: new Date().toISOString(),
-      usageLimit: 1,
       combinesWith: {
         orderDiscounts: false,
         productDiscounts: true,
@@ -172,8 +250,11 @@ export async function action({ request }) {
       },
       context: {
         customers: {
-          add: [toCustomerGid(loggedInCustomerId)],
+          add: [shopifyCustomerId],
         },
+      },
+      minimumRequirement: {
+        subtotal: { greaterThanOrEqualToSubtotal: formatCentsToDollars(applyCents) },
       },
       customerGets: {
         value: {
@@ -187,11 +268,11 @@ export async function action({ request }) {
     };
 
     const gqlRes = await admin.graphql(mutation, {
-      variables: { basicCodeDiscount },
+      variables: { automaticBasicDiscount },
     });
 
     const gqlJson = await gqlRes.json();
-    const payload = gqlJson?.data?.discountCodeBasicCreate;
+    const payload = gqlJson?.data?.discountAutomaticBasicCreate;
     const userErrors = payload?.userErrors ?? [];
 
     if (!payload || userErrors.length > 0) {
@@ -204,22 +285,40 @@ export async function action({ request }) {
       return textResponse("Failed to create discount", 500);
     }
 
-    const createdCode =
-      payload?.codeDiscountNode?.codeDiscount?.codes?.nodes?.[0]?.code ||
-      uniqueCode;
+    const automaticNodeId = payload?.automaticDiscountNode?.id ?? null;
 
-    log("Created discount code", {
+    if (!automaticNodeId) {
+      log("Automatic discount missing node id", {
+        shop,
+        loggedInCustomerId,
+        payload,
+      });
+      return textResponse("Failed to create discount", 500);
+    }
+
+    await db.discount.create({
+      data: {
+        shopifyCustomerId,
+        automaticDiscountNodeId: automaticNodeId,
+        discountTitle: uniqueTitle,
+      },
+    });
+
+    await setCustomerPendingRewardsMetafield({
+      shopDomain: shop,
+      shopifyCustomerId,
+      pendingRewardsCents: applyCents,
+    });
+
+    log("Created discount", {
       shop,
       loggedInCustomerId,
-      code: createdCode,
+      title: uniqueTitle,
       rewardsCents,
       applyCents,
     });
 
-    return jsonResponse({
-      code: createdCode,
-      rewardsSpent: applyCents,
-    });
+    return textResponse("OK", 200);
   } catch (err) {
     log("Unhandled error in action", err);
     return textResponse("Internal server error", 500);

@@ -1,4 +1,5 @@
 import { authenticate, unauthenticated } from "../shopify.server";
+import db from "../db.server";
 
 const log = (...args) => {
   console.log("[apps/rewards/delete-discount]", ...args);
@@ -50,70 +51,69 @@ export async function action({ request }) {
 
     log("Request", { shop, loggedInCustomerId });
 
-    let code;
-    try {
-      const body = await request.json();
-      code = String(body?.code ?? "").trim();
-    } catch {
-      return textResponse("Invalid JSON body", 400);
-    }
+    const shopifyCustomerId = loggedInCustomerId.startsWith("gid://")
+      ? loggedInCustomerId
+      : `gid://shopify/Customer/${loggedInCustomerId}`;
 
-    if (!code) {
-      return textResponse("Missing code", 400);
+    const existing = await db.discount.findUnique({
+      where: { shopifyCustomerId },
+    });
+
+    if (!existing) {
+      return textResponse("OK", 200);
     }
 
     const { admin } = await unauthenticated.admin(shop);
 
-    const lookupQuery = `
-      query CodeDiscountNodeByCode($code: String!) {
-        codeDiscountNodeByCode(code: $code) {
-          id
-        }
-      }
-    `;
-
-    const lookupRes = await admin.graphql(lookupQuery, {
-      variables: { code },
-    });
-    const lookupJson = await lookupRes.json();
-    const discountNodeId =
-      lookupJson?.data?.codeDiscountNodeByCode?.id ?? null;
-
-    if (!discountNodeId) {
-      log("Discount code not found", { shop, loggedInCustomerId, code });
-      return textResponse("OK", 200);
-    }
-
     const deleteMutation = `
-      mutation DiscountCodeDelete($id: ID!) {
-        discountCodeDelete(id: $id) {
-          deletedCodeDiscountId
-          userErrors {
-            field
-            message
-          }
+      mutation DiscountAutomaticDelete($id: ID!) {
+        discountAutomaticDelete(id: $id) {
+          deletedAutomaticDiscountId
+          userErrors { field message }
         }
       }
     `;
 
     const deleteRes = await admin.graphql(deleteMutation, {
-      variables: { id: discountNodeId },
+      variables: { id: existing.automaticDiscountNodeId },
     });
     const deleteJson = await deleteRes.json();
     const userErrors =
-      deleteJson?.data?.discountCodeDelete?.userErrors ?? [];
+      deleteJson?.data?.discountAutomaticDelete?.userErrors ?? [];
 
     if (userErrors.length > 0) {
       log("Delete failed", {
         shop,
         loggedInCustomerId,
-        code,
         userErrors,
       });
-      return textResponse("Failed to delete discount", 502);
     }
 
-    log("Deleted", { shop, loggedInCustomerId, code });
+    const resetMutation = `
+      mutation ResetPendingRewards($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          userErrors { field message }
+        }
+      }
+    `;
+
+    await admin.graphql(resetMutation, {
+      variables: {
+        metafields: [
+          {
+            ownerId: shopifyCustomerId,
+            namespace: "rewards",
+            key: "pending_rewards",
+            type: "number_integer",
+            value: "0",
+          },
+        ],
+      },
+    });
+
+    await db.discount.delete({ where: { id: existing.id } });
+
+    log("Deleted", { shop, loggedInCustomerId });
     return textResponse("OK", 200);
   } catch (err) {
     log("Unhandled error in action", err);
