@@ -253,9 +253,6 @@ export async function action({ request }) {
           add: [shopifyCustomerId],
         },
       },
-      minimumRequirement: {
-        subtotal: { greaterThanOrEqualToSubtotal: formatCentsToDollars(applyCents) },
-      },
       customerGets: {
         value: {
           discountAmount: {
