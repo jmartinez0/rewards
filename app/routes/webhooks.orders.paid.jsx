@@ -294,6 +294,7 @@ export const action = async ({ request }) => {
       })
     : 0;
   const spendRequestCents = spentFromOrderNotesCents || pendingRewardsCents;
+  const maxSpendForOrderCents = Math.max(0, orderTotalCents);
   const orderNumericId = getTrailingNumericId(orderId);
 
   try {
@@ -325,7 +326,12 @@ export const action = async ({ request }) => {
         select: { id: true },
       });
 
-      if (!existingSpend && spendRequestCents > 0 && customer.currentRewardsCents > 0) {
+      if (
+        !existingSpend &&
+        spendRequestCents > 0 &&
+        maxSpendForOrderCents > 0 &&
+        customer.currentRewardsCents > 0
+      ) {
         const lots = await tx.ledgerEntry.findMany({
           where: {
             customerId: customer.id,
@@ -357,6 +363,7 @@ export const action = async ({ request }) => {
 
         let remainingToSpend = Math.min(
           spendRequestCents,
+          maxSpendForOrderCents,
           customer.currentRewardsCents,
           totalAvailable,
         );
@@ -395,6 +402,7 @@ export const action = async ({ request }) => {
 
         const spentAppliedCents = Math.min(
           spendRequestCents,
+          maxSpendForOrderCents,
           customer.currentRewardsCents,
           totalAvailable,
         );
