@@ -16,12 +16,60 @@ const parseMoneyToCents = (amount) => {
   return negative ? -cents : cents;
 };
 
+const parsePositiveInt = (value) => {
+  const normalized = String(value ?? "").trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+};
+
 const getCustomerGid = (shopifyCustomerId) => {
   if (!shopifyCustomerId) return null;
   const raw = String(shopifyCustomerId);
   if (raw.startsWith("gid://shopify/Customer/")) return raw;
   const match = raw.match(/(\d+)$/);
   return match ? `gid://shopify/Customer/${match[1]}` : null;
+};
+
+const getNoteAttributesMap = (order) => {
+  const fromRest = Array.isArray(order?.note_attributes) ? order.note_attributes : [];
+  const fromGraphql = Array.isArray(order?.customAttributes) ? order.customAttributes : [];
+  const fromCamel = Array.isArray(order?.noteAttributes) ? order.noteAttributes : [];
+  const entries = [...fromRest, ...fromGraphql, ...fromCamel];
+  const map = new Map();
+  for (const entry of entries) {
+    const key = entry?.key != null ? String(entry.key) : "";
+    if (!key) continue;
+    map.set(key, entry?.value != null ? String(entry.value) : "");
+  }
+  return map;
+};
+
+const getCustomerPendingRewardsMetafield = async ({ shopDomain, shopifyCustomerId }) => {
+  const ownerId = getCustomerGid(shopifyCustomerId);
+  if (!ownerId) return 0;
+
+  try {
+    const { admin } = await unauthenticated.admin(shopDomain);
+    const query = `
+      query CustomerPendingRewards($id: ID!) {
+        customer(id: $id) {
+          pendingRewards: metafield(namespace: "rewards", key: "pending_rewards") { value }
+        }
+      }
+    `;
+
+    const response = await admin.graphql(query, { variables: { id: ownerId } });
+    const json = await response.json();
+    return parsePositiveInt(json?.data?.customer?.pendingRewards?.value) ?? 0;
+  } catch (err) {
+    error("Error reading pending rewards metafield", {
+      ownerId,
+      error: err?.message ?? String(err),
+    });
+    return 0;
+  }
 };
 
 const setCustomerRewardsMetafields = async ({
@@ -187,6 +235,12 @@ const computeEarnedRewardsCents = ({ orderTotalCents, centsToOneUsd }) => {
   return Math.floor((orderTotalCents * 100) / centsToOneUsd);
 };
 
+const getTrailingNumericId = (value) => {
+  if (value == null) return null;
+  const match = String(value).match(/(\d+)$/);
+  return match ? match[1] : null;
+};
+
 export const action = async ({ request }) => {
   const requestId = crypto?.randomUUID?.() ?? String(Date.now());
   const startedAt = Date.now();
@@ -201,6 +255,7 @@ export const action = async ({ request }) => {
   const email = getOrderEmail(order);
   const shopifyCustomerId = getShopifyCustomerId(order);
   const name = getOrderName(order, email);
+  const noteAttributes = getNoteAttributesMap(order);
 
   if (!orderId || !email) {
     log("Skipping (missing orderId/email)", { requestId, orderId, hasEmail: Boolean(email) });
@@ -231,6 +286,15 @@ export const action = async ({ request }) => {
 
   let discountCleanup = null;
   let updatedCustomerForMetafields = null;
+  const spentFromOrderNotesCents = parsePositiveInt(noteAttributes.get("Rewards spent")) ?? 0;
+  const pendingRewardsCents = shopifyCustomerId
+    ? await getCustomerPendingRewardsMetafield({
+        shopDomain: shop,
+        shopifyCustomerId,
+      })
+    : 0;
+  const spendRequestCents = spentFromOrderNotesCents || pendingRewardsCents;
+  const orderNumericId = getTrailingNumericId(orderId);
 
   try {
     updatedCustomerForMetafields = await db.$transaction(async (tx) => {
@@ -254,6 +318,93 @@ export const action = async ({ request }) => {
           where: { id: customer.id },
           data: { name },
         });
+      }
+
+      const existingSpend = await tx.ledgerEntry.findFirst({
+        where: { type: "SPEND", orderId },
+        select: { id: true },
+      });
+
+      if (!existingSpend && spendRequestCents > 0 && customer.currentRewardsCents > 0) {
+        const lots = await tx.ledgerEntry.findMany({
+          where: {
+            customerId: customer.id,
+            remainingRewardsCents: { gt: 0 },
+            AND: [
+              {
+                OR: [
+                  { type: "EARN" },
+                  { type: "ADJUST", rewardsDeltaCents: { gt: 0 } },
+                ],
+              },
+              {
+                OR: [
+                  { expiresAt: null },
+                  { expiresAt: { gt: earnedAt } },
+                ],
+              },
+            ],
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          select: { id: true, remainingRewardsCents: true },
+        });
+
+        const totalAvailable = lots.reduce((sum, lot) => {
+          const lotRemaining =
+            typeof lot.remainingRewardsCents === "number" ? lot.remainingRewardsCents : 0;
+          return sum + Math.max(0, lotRemaining);
+        }, 0);
+
+        let remainingToSpend = Math.min(
+          spendRequestCents,
+          customer.currentRewardsCents,
+          totalAvailable,
+        );
+
+        for (const lot of lots) {
+          if (remainingToSpend <= 0) break;
+
+          const lotRemaining =
+            typeof lot.remainingRewardsCents === "number" ? lot.remainingRewardsCents : 0;
+          if (lotRemaining <= 0) continue;
+
+          const take = Math.min(lotRemaining, remainingToSpend);
+          remainingToSpend -= take;
+
+          await tx.ledgerEntry.update({
+            where: { id: lot.id },
+            data: { remainingRewardsCents: Math.max(0, lotRemaining - take) },
+          });
+
+          await tx.ledgerEntry.create({
+            data: {
+              customerId: customer.id,
+              type: "SPEND",
+              rewardsDeltaCents: -take,
+              remainingRewardsCents: null,
+              expiresAt: null,
+              orderId,
+              sourceLotId: lot.id,
+              notes: orderNumericId
+                ? `Order ${orderNumericId} paid with rewards discount`
+                : "Order paid with rewards discount",
+              createdAt: earnedAt,
+            },
+          });
+        }
+
+        const spentAppliedCents = Math.min(
+          spendRequestCents,
+          customer.currentRewardsCents,
+          totalAvailable,
+        );
+
+        if (spentAppliedCents > 0) {
+          customer = await tx.customer.update({
+            where: { id: customer.id },
+            data: { currentRewardsCents: { decrement: spentAppliedCents } },
+          });
+        }
       }
 
       const existingEarn = await tx.ledgerEntry.findFirst({
