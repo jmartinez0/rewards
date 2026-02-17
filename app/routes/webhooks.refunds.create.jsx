@@ -77,25 +77,6 @@ const setCustomerRewardsMetafields = async ({
   }
 };
 
-const parsePositiveInt = (value) => {
-  const normalized = String(value ?? "").trim();
-  if (!/^\d+$/.test(normalized)) return null;
-  const parsed = Number.parseInt(normalized, 10);
-  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) return null;
-  return parsed;
-};
-
-const getNoteAttributesMap = (order) => {
-  const entries = Array.isArray(order?.customAttributes) ? order.customAttributes : [];
-  const map = new Map();
-  for (const entry of entries) {
-    const key = entry?.key != null ? String(entry.key) : "";
-    if (!key) continue;
-    map.set(key, entry?.value != null ? String(entry.value) : "");
-  }
-  return map;
-};
-
 const getRefundId = (refund) =>
   refund?.admin_graphql_api_id ? refund.admin_graphql_api_id : refund?.id != null ? String(refund.id) : null;
 
@@ -200,7 +181,6 @@ const fetchOrderSummary = async ({ shopDomain, orderNumericId }) => {
         originalTotalPriceSet { shopMoney { amount } }
         totalPriceSet { shopMoney { amount } }
         currentTotalPriceSet { shopMoney { amount } }
-        customAttributes { key value }
         customer { id email }
       }
     }
@@ -254,9 +234,6 @@ export const action = async ({ request }) => {
   const orderId = order?.id ?? `gid://shopify/Order/${orderNumericId}`;
   const email = order?.email ?? order?.customer?.email ?? null;
   const shopifyCustomerId = order?.customer?.id ?? null;
-  const noteAttributes = getNoteAttributesMap(order);
-
-  const spendOnOrderCents = parsePositiveInt(noteAttributes.get("Rewards spent")) ?? 0;
   const orderTotalCents = parseMoneyToCents(
     order?.originalTotalPriceSet?.shopMoney?.amount ??
       order?.totalPriceSet?.shopMoney?.amount ??
@@ -341,10 +318,19 @@ export const action = async ({ request }) => {
       });
       const removableEarnedCents = Math.min(earnLotRemaining, earnedToRemoveCents);
 
+      const spendOnOrderResult = await tx.ledgerEntry.aggregate({
+        where: {
+          type: "SPEND",
+          orderId,
+        },
+        _sum: { rewardsDeltaCents: true },
+      });
+
+      const spendOnOrderCents = Math.max(0, Math.abs(spendOnOrderResult?._sum?.rewardsDeltaCents ?? 0));
       const spentRefundEstimateCents =
         orderTotalCents > 0
           ? Math.floor((spendOnOrderCents * clampedRefundTotalCents) / orderTotalCents)
-          : spendOnOrderCents;
+          : 0;
 
       const alreadyRefundedSpentResult = await tx.ledgerEntry.aggregate({
         where: {
