@@ -58,6 +58,7 @@ model LedgerEntry {
   orderId               String?
   sourceLotId           Int?
   adjustmentGroupId     String?       @db.Uuid
+  adjustedByEmail       String?
   notes                 String?
   createdAt             DateTime      @default(now())
   customer              Customer      @relation(fields: [customerId], references: [id])

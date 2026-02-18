@@ -120,7 +120,7 @@ export const loader = async ({ request, params }) => {
 };
 
 export const action = async ({ request, params }) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   const id = Number.parseInt(params.id, 10);
   if (Number.isNaN(id)) {
@@ -183,6 +183,7 @@ export const action = async ({ request, params }) => {
 
   const rewardsDeltaCents =
     adjustmentType === "decrease" ? -adjustByCents : adjustByCents;
+  const adjustedByEmail = session?.email ? String(session.email).trim() : null;
 
   await db.$transaction(async (tx) => {
     if (rewardsDeltaCents > 0) {
@@ -193,6 +194,7 @@ export const action = async ({ request, params }) => {
           rewardsDeltaCents,
           remainingRewardsCents: rewardsDeltaCents,
           expiresAt,
+          adjustedByEmail,
           notes: reason,
           createdAt: now,
         },
@@ -263,6 +265,7 @@ export const action = async ({ request, params }) => {
             rewardsDeltaCents: -take,
             remainingRewardsCents: null,
             expiresAt: null,
+            adjustedByEmail,
             notes: reason,
             createdAt: now,
             sourceLotId: lot.id,
@@ -585,6 +588,11 @@ export default function CustomerDetails() {
                     row.kind === "adjust_group"
                       ? row.entries?.[0]?.notes
                       : entry.notes;
+                  const adjustedBy =
+                    row.kind === "adjust_group"
+                      ? row.entries?.find((rowEntry) => String(rowEntry?.adjustedByEmail ?? "").trim())
+                        ?.adjustedByEmail
+                      : entry.adjustedByEmail;
                   const reason = stripRefundMarker(rawNotes?.trim());
                   const refundReasonMatches =
                     reason?.startsWith("Order ") &&
@@ -597,24 +605,32 @@ export default function CustomerDetails() {
 
                   if (refundReasonMatches && numericOrderId) {
                     return (
-                      <s-text>
-                        Reason: Order{" "}
-                        {reasonOrderAdminHref ? (
-                          <s-link
-                            href={reasonOrderAdminHref}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {numericOrderId}
-                          </s-link>
-                        ) : (
-                          numericOrderId
-                        )}{reason.includes("partially") ? " was partially refunded" : " was refunded"}
-                      </s-text>
+                      <s-stack direction="block" gap="small-200">
+                        <s-text>
+                          Reason: Order{" "}
+                          {reasonOrderAdminHref ? (
+                            <s-link
+                              href={reasonOrderAdminHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {numericOrderId}
+                            </s-link>
+                          ) : (
+                            numericOrderId
+                          )}{reason.includes("partially") ? " was partially refunded" : " was refunded"}
+                        </s-text>
+                        {adjustedBy ? <s-text>Adjusted by: {adjustedBy}</s-text> : null}
+                      </s-stack>
                     );
                   }
 
-                  return <s-text>Reason: {reason || "—"}</s-text>;
+                  return (
+                    <s-stack direction="block" gap="small-200">
+                      <s-text>Reason: {reason || "—"}</s-text>
+                      {adjustedBy ? <s-text>Adjusted by: {adjustedBy}</s-text> : null}
+                    </s-stack>
+                  );
                 })()
               ) : null}
               {rewardsDepletedBy && rewardsDepletedBy.length ? (
