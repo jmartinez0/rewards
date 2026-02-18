@@ -32,20 +32,6 @@ const getCustomerGid = (shopifyCustomerId) => {
   return match ? `gid://shopify/Customer/${match[1]}` : null;
 };
 
-const getNoteAttributesMap = (order) => {
-  const fromRest = Array.isArray(order?.note_attributes) ? order.note_attributes : [];
-  const fromGraphql = Array.isArray(order?.customAttributes) ? order.customAttributes : [];
-  const fromCamel = Array.isArray(order?.noteAttributes) ? order.noteAttributes : [];
-  const entries = [...fromRest, ...fromGraphql, ...fromCamel];
-  const map = new Map();
-  for (const entry of entries) {
-    const key = entry?.key != null ? String(entry.key) : "";
-    if (!key) continue;
-    map.set(key, entry?.value != null ? String(entry.value) : "");
-  }
-  return map;
-};
-
 const getCustomerPendingRewardsMetafield = async ({ shopDomain, shopifyCustomerId }) => {
   const ownerId = getCustomerGid(shopifyCustomerId);
   if (!ownerId) return 0;
@@ -241,6 +227,74 @@ const getTrailingNumericId = (value) => {
   return match ? match[1] : null;
 };
 
+const getOrderDiscountApplications = (order) => {
+  if (Array.isArray(order?.discount_applications)) return order.discount_applications;
+  if (Array.isArray(order?.discountApplications)) return order.discountApplications;
+  return [];
+};
+
+const getDiscountAllocations = (value) => {
+  if (Array.isArray(value?.discount_allocations)) return value.discount_allocations;
+  if (Array.isArray(value?.discountAllocations)) return value.discountAllocations;
+  return [];
+};
+
+const getAllocationIndex = (allocation) => {
+  if (Number.isInteger(allocation?.discount_application_index)) {
+    return allocation.discount_application_index;
+  }
+  if (Number.isInteger(allocation?.discountApplicationIndex)) {
+    return allocation.discountApplicationIndex;
+  }
+  const parsedSnake = Number.parseInt(String(allocation?.discount_application_index ?? ""), 10);
+  if (Number.isFinite(parsedSnake)) return parsedSnake;
+  const parsedCamel = Number.parseInt(String(allocation?.discountApplicationIndex ?? ""), 10);
+  if (Number.isFinite(parsedCamel)) return parsedCamel;
+  return null;
+};
+
+const getUtilizedRewardsDiscountCents = ({ order, discountTitle }) => {
+  const applications = getOrderDiscountApplications(order);
+  if (!applications.length) return 0;
+
+  const targetIndexes = new Set();
+  applications.forEach((application, index) => {
+    const title = String(application?.title ?? "");
+    if (discountTitle && title === discountTitle) {
+      targetIndexes.add(index);
+      return;
+    }
+    if (!discountTitle && title.startsWith("REWARDS-")) {
+      targetIndexes.add(index);
+    }
+  });
+
+  if (!targetIndexes.size) return 0;
+
+  const lineItems = Array.isArray(order?.line_items)
+    ? order.line_items
+    : Array.isArray(order?.lineItems)
+      ? order.lineItems
+      : [];
+
+  let totalCents = 0;
+  for (const line of lineItems) {
+    const allocations = getDiscountAllocations(line);
+    for (const allocation of allocations) {
+      const index = getAllocationIndex(allocation);
+      if (index == null || !targetIndexes.has(index)) continue;
+      const amount =
+        allocation?.amount_set?.shop_money?.amount ??
+        allocation?.amountSet?.shopMoney?.amount ??
+        allocation?.amount ??
+        "0";
+      totalCents += parseMoneyToCents(amount);
+    }
+  }
+
+  return Math.max(0, totalCents);
+};
+
 export const action = async ({ request }) => {
   const requestId = crypto?.randomUUID?.() ?? String(Date.now());
   const startedAt = Date.now();
@@ -255,7 +309,6 @@ export const action = async ({ request }) => {
   const email = getOrderEmail(order);
   const shopifyCustomerId = getShopifyCustomerId(order);
   const name = getOrderName(order, email);
-  const noteAttributes = getNoteAttributesMap(order);
 
   if (!orderId || !email) {
     log("Skipping (missing orderId/email)", { requestId, orderId, hasEmail: Boolean(email) });
@@ -286,15 +339,12 @@ export const action = async ({ request }) => {
 
   let discountCleanup = null;
   let updatedCustomerForMetafields = null;
-  const spentFromOrderNotesCents = parsePositiveInt(noteAttributes.get("Rewards spent")) ?? 0;
   const pendingRewardsCents = shopifyCustomerId
     ? await getCustomerPendingRewardsMetafield({
         shopDomain: shop,
         shopifyCustomerId,
       })
     : 0;
-  const spendRequestCents = spentFromOrderNotesCents || pendingRewardsCents;
-  const maxSpendForOrderCents = Math.max(0, orderTotalCents);
   const orderNumericId = getTrailingNumericId(orderId);
 
   try {
@@ -326,10 +376,24 @@ export const action = async ({ request }) => {
         select: { id: true },
       });
 
+      let utilizedRewardsDiscountCents = 0;
+      if (customer.shopifyCustomerId) {
+        const existingDiscount = await tx.discount.findUnique({
+          where: { shopifyCustomerId: customer.shopifyCustomerId },
+          select: { id: true, automaticDiscountNodeId: true, discountTitle: true },
+        });
+        if (existingDiscount) {
+          discountCleanup = existingDiscount;
+        }
+        utilizedRewardsDiscountCents = getUtilizedRewardsDiscountCents({
+          order,
+          discountTitle: existingDiscount?.discountTitle ?? null,
+        });
+      }
+
       if (
         !existingSpend &&
-        spendRequestCents > 0 &&
-        maxSpendForOrderCents > 0 &&
+        utilizedRewardsDiscountCents > 0 &&
         customer.currentRewardsCents > 0
       ) {
         const lots = await tx.ledgerEntry.findMany({
@@ -362,11 +426,11 @@ export const action = async ({ request }) => {
         }, 0);
 
         let remainingToSpend = Math.min(
-          spendRequestCents,
-          maxSpendForOrderCents,
+          utilizedRewardsDiscountCents,
           customer.currentRewardsCents,
           totalAvailable,
         );
+        const targetSpendCents = remainingToSpend;
 
         for (const lot of lots) {
           if (remainingToSpend <= 0) break;
@@ -400,12 +464,7 @@ export const action = async ({ request }) => {
           });
         }
 
-        const spentAppliedCents = Math.min(
-          spendRequestCents,
-          maxSpendForOrderCents,
-          customer.currentRewardsCents,
-          totalAvailable,
-        );
+        const spentAppliedCents = Math.max(0, targetSpendCents - remainingToSpend);
 
         if (spentAppliedCents > 0) {
           customer = await tx.customer.update({
@@ -413,6 +472,27 @@ export const action = async ({ request }) => {
             data: { currentRewardsCents: { decrement: spentAppliedCents } },
           });
         }
+
+        if (
+          pendingRewardsCents > 0 &&
+          spentAppliedCents > 0 &&
+          pendingRewardsCents !== spentAppliedCents
+        ) {
+          log("Pending rewards mismatch vs utilized discount", {
+            requestId,
+            orderId,
+            pendingRewardsCents,
+            utilizedRewardsDiscountCents,
+            spentAppliedCents,
+          });
+        }
+      }
+      if (!existingSpend && utilizedRewardsDiscountCents === 0 && pendingRewardsCents > 0) {
+        log("No utilized rewards discount found on order allocations", {
+          requestId,
+          orderId,
+          pendingRewardsCents,
+        });
       }
 
       const existingEarn = await tx.ledgerEntry.findFirst({
@@ -440,17 +520,6 @@ export const action = async ({ request }) => {
             lifetimeRewardsCents: { increment: earnedRewardsCents },
           },
         });
-      }
-
-      if (customer.shopifyCustomerId) {
-        const existingDiscount = await tx.discount.findUnique({
-          where: { shopifyCustomerId: customer.shopifyCustomerId },
-          select: { id: true, automaticDiscountNodeId: true },
-        });
-
-        if (existingDiscount) {
-          discountCleanup = existingDiscount;
-        }
       }
 
       return {
