@@ -34,7 +34,7 @@ const setCustomerPendingRewardsMetafield = async ({
   shopifyCustomerId,
   pendingRewardsCents,
 }) => {
-  if (!shopifyCustomerId) return;
+  if (!shopifyCustomerId) return false;
   try {
     const { admin } = await unauthenticated.admin(shopDomain);
     const mutation = `
@@ -67,13 +67,16 @@ const setCustomerPendingRewardsMetafield = async ({
         shopifyCustomerId,
         userErrors,
       });
+      return false;
     }
+    return true;
   } catch (err) {
     log("Error setting pending rewards metafield", {
       shopDomain,
       shopifyCustomerId,
       error: err?.message ?? String(err),
     });
+    return false;
   }
 };
 
@@ -293,18 +296,25 @@ export async function action({ request }) {
       return textResponse("Failed to create discount", 500);
     }
 
+    const pendingRewardsSet = await setCustomerPendingRewardsMetafield({
+      shopDomain: shop,
+      shopifyCustomerId,
+      pendingRewardsCents: applyCents,
+    });
+    if (!pendingRewardsSet) {
+      await deleteAutomaticDiscountById({
+        shopDomain: shop,
+        automaticDiscountNodeId: automaticNodeId,
+      });
+      return textResponse("Failed to set pending rewards", 500);
+    }
+
     await db.discount.create({
       data: {
         shopifyCustomerId,
         automaticDiscountNodeId: automaticNodeId,
         discountTitle: uniqueTitle,
       },
-    });
-
-    await setCustomerPendingRewardsMetafield({
-      shopDomain: shop,
-      shopifyCustomerId,
-      pendingRewardsCents: applyCents,
     });
 
     log("Created discount", {

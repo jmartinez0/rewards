@@ -16,16 +16,6 @@ export async function loader() {
   });
 }
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      ...NOINDEX_HEADERS,
-    },
-  });
-}
-
 function textResponse(text, status) {
   return new Response(text, {
     status,
@@ -97,7 +87,7 @@ export async function action({ request }) {
       }
     `;
 
-    await admin.graphql(resetMutation, {
+    const resetRes = await admin.graphql(resetMutation, {
       variables: {
         metafields: [
           {
@@ -110,6 +100,16 @@ export async function action({ request }) {
         ],
       },
     });
+    const resetJson = await resetRes.json();
+    const resetErrors = resetJson?.data?.metafieldsSet?.userErrors ?? [];
+    if (resetErrors.length > 0) {
+      log("Failed to reset pending rewards metafield", {
+        shop,
+        loggedInCustomerId,
+        resetErrors,
+      });
+      return textResponse("Failed to reset pending rewards", 500);
+    }
 
     await db.discount.delete({ where: { id: existing.id } });
 
