@@ -199,6 +199,19 @@ const computeEarnedRewardsCents = ({ totalCents, centsToOneUsd }) => {
   return Math.floor((totalCents * 100) / centsToOneUsd);
 };
 
+const getOrderTotalCentsForRefundMath = (order) => {
+  const candidates = [
+    order?.originalTotalPriceSet?.shopMoney?.amount,
+    order?.totalPriceSet?.shopMoney?.amount,
+    order?.currentTotalPriceSet?.shopMoney?.amount,
+  ]
+    .map((amount) => parseMoneyToCents(amount))
+    .filter((cents) => Number.isFinite(cents) && cents > 0);
+
+  if (!candidates.length) return 0;
+  return Math.max(...candidates);
+};
+
 export const action = async ({ request }) => {
   const requestId = crypto?.randomUUID?.() ?? String(Date.now());
   const startedAt = Date.now();
@@ -234,12 +247,7 @@ export const action = async ({ request }) => {
   const orderId = order?.id ?? `gid://shopify/Order/${orderNumericId}`;
   const email = order?.email ?? order?.customer?.email ?? null;
   const shopifyCustomerId = order?.customer?.id ?? null;
-  const orderTotalCents = parseMoneyToCents(
-    order?.originalTotalPriceSet?.shopMoney?.amount ??
-      order?.totalPriceSet?.shopMoney?.amount ??
-      order?.currentTotalPriceSet?.shopMoney?.amount ??
-      null,
-  );
+  const orderTotalCents = getOrderTotalCentsForRefundMath(order);
   const clampedRefundTotalCents =
     orderTotalCents > 0 ? Math.min(refundTotalCents, orderTotalCents) : refundTotalCents;
   const refundReason =
